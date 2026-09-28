@@ -1,17 +1,25 @@
 """The tap-s3 tap class."""
 
 import datetime
+import json
 import re
 from functools import cached_property
 from typing import Any, Dict, List, Optional, Pattern, Tuple
 
 from singer_sdk import Stream, Tap
 from singer_sdk import typing as th
+from singer_sdk._singerlib import Catalog
 from singer_sdk.exceptions import ConfigValidationError
 
 from tap_s3.client import S3Bucket
 from tap_s3.layout import BucketLayout, build_layout, normalize_prefix
-from tap_s3.nested import PARENT_ROW_COLUMN, ROW_KEY_COLUMN
+from tap_s3.nested import (
+    PARENT_ROW_COLUMN,
+    ROW_KEY_COLUMN,
+    Lineage,
+    Path,
+    child_stream_name,
+)
 from tap_s3.streams import (
     METADATA_PROPERTIES,
     S3ChildStream,
@@ -20,6 +28,8 @@ from tap_s3.streams import (
     parse_timestamp,
 )
 
+PARENT_STREAM_METADATA = "tap-s3.parent-stream"
+LIST_PATH_METADATA = "tap-s3.list-path"
 REQUIRED_SETTINGS = ("aws_access_key_id", "aws_secret_access_key", "bucket")
 DEFAULT_LOOKBACK_MINUTES = 60
 
@@ -64,6 +74,10 @@ class TapS3(Tap):
     name = "tap-s3"
 
     listed_at: datetime.datetime
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self._raw_catalog = _read_raw_catalog(kwargs.get("catalog"))
+        super().__init__(*args, **kwargs)
 
     # The first five settings match the Hotglue S3 connector form, so the
     # connection form stays the same. Do not rename them.
@@ -238,60 +252,180 @@ class TapS3(Tap):
         _ = self.exclude_pattern
         if self.input_catalog:
             return self._streams_from_catalog()
-        streams: List[Stream] = []
+        roots: Dict[str, S3Stream] = {}
+        pending: List[Tuple[S3Stream, Lineage, dict]] = []
         for name, objects in sorted(self.layout.streams.items()):
             schemas = infer_schemas(self, name, objects)
-            root = S3Stream(tap=self, name=name, schema=schemas.pop(name))
-            streams.append(root)
-            for child_name, schema in schemas.items():
-                child = S3ChildStream(self, child_name, schema, root)
-                root.child_streams.append(child)
-                streams.append(child)
+            roots[name] = S3Stream(tap=self, name=name, schema=schemas.pop(()))
+            pending.extend((roots[name], lineage, schema) for lineage, schema in schemas.items())
+        streams: List[Stream] = list(roots.values())
+        taken = set(roots)
+        by_lineage: Dict[Tuple[str, Lineage], S3Stream] = {
+            (name, ()): root for name, root in roots.items()
+        }
+        # Parents come before their children, so a child's name can build on
+        # its parent's final name.
+        for root, lineage, schema in sorted(
+            pending, key=lambda item: (len(item[1]), item[0].name, item[1])
+        ):
+            parent = by_lineage[(root.name, lineage[:-1])]
+            natural = child_stream_name(parent.name, lineage[-1])
+            name = natural
+            counter = 2
+            while name in taken:
+                name = f"{natural}_{counter}"
+                counter += 1
+            if name != natural:
+                self.logger.warning(
+                    "Stream name '%s' is taken by another stream. The child stream "
+                    "for list %s in stream '%s' is named '%s'.",
+                    natural,
+                    ".".join(lineage[-1]),
+                    parent.name,
+                    name,
+                )
+            taken.add(name)
+            child = S3ChildStream(self, name, schema, root, parent, lineage)
+            root.child_streams.append(child)
+            by_lineage[(root.name, lineage)] = child
+            streams.append(child)
         return streams
 
     def _streams_from_catalog(self) -> List[Stream]:
-        """Build streams from the catalog, and link each child to its root.
+        """Build streams from the catalog, and link each child to its parent.
 
-        A child stream has `_row_key` and `_parent_row` columns. Its root is
-        the longest listed stream name that starts its name, followed by
-        `__`. When the catalog leaves the root out, the tap adds it,
-        deselected, to read the objects for the child.
+        A child stream's catalog entry names its parent stream and its list
+        path in custom metadata at breadcrumb `[]`: PARENT_STREAM_METADATA and
+        LIST_PATH_METADATA. The tap links a child by that metadata only.
+
+        - A child without the metadata, or whose parent is missing, is skipped
+          with a warning, and its state is left alone.
+        - When the catalog leaves out a file stream that the bucket still has,
+          and a child needs it, the tap adds it, deselected, to read objects.
         """
+        extra = _stream_metadata(self._raw_catalog)
         roots: Dict[str, S3Stream] = {}
-        children: List[Tuple[str, dict]] = []
+        specs: Dict[str, Tuple[str, Path, dict]] = {}
         for entry in self.input_catalog.streams:  # type: ignore[union-attr]
             name = entry.stream or entry.tap_stream_id
             schema = entry.schema.to_dict()
+            metadata = extra.get(entry.tap_stream_id, {})
+            parent = metadata.get(PARENT_STREAM_METADATA)
+            path = metadata.get(LIST_PATH_METADATA)
+            if parent is not None:
+                if (
+                    isinstance(parent, str)
+                    and isinstance(path, list)
+                    and path
+                    and all(isinstance(part, str) for part in path)
+                ):
+                    specs[name] = (parent, tuple(path), schema)
+                else:
+                    self.logger.warning(
+                        "Stream '%s' is skipped: its %s or %s metadata is not valid.",
+                        name,
+                        PARENT_STREAM_METADATA,
+                        LIST_PATH_METADATA,
+                    )
+                continue
             properties = schema.get("properties", {})
             if ROW_KEY_COLUMN in properties and PARENT_ROW_COLUMN in properties:
-                children.append((name, schema))
-            else:
-                roots[name] = S3Stream(tap=self, name=name, schema=schema)
-        streams: List[Stream] = list(roots.values())
-        known = set(self.layout.streams) | set(roots)
-        for name, schema in children:
-            candidates = [root for root in known if name.startswith(root + "__")]
-            if not candidates:
                 self.logger.warning(
-                    "Stream '%s' has no parent stream in the bucket. It is skipped.",
+                    "Stream '%s' is skipped: it looks like a child stream, but its "
+                    "catalog entry has no %s metadata. Run discovery again.",
                     name,
+                    PARENT_STREAM_METADATA,
                 )
                 continue
-            root_name = max(candidates, key=len)
-            root = roots.get(root_name)
-            if root is None:
-                root = S3Stream(
+            roots[name] = S3Stream(tap=self, name=name, schema=schema)
+        streams: List[Stream] = list(roots.values())
+        built: Dict[str, S3Stream] = dict(roots)
+
+        def resolve(name: str, seen: Tuple[str, ...]) -> Optional[S3Stream]:
+            if name in built:
+                return built[name]
+            if name in specs and name not in seen:
+                parent_name, path, schema = specs[name]
+                parent = resolve(parent_name, seen + (name,))
+                if parent is None:
+                    return None
+                root = parent.root if isinstance(parent, S3ChildStream) else parent
+                child = S3ChildStream(
+                    self, name, schema, root, parent, parent.lineage + (path,)
+                )
+                root.child_streams.append(child)
+                streams.append(child)
+                built[name] = child
+                return child
+            if name not in specs and name in self.layout.streams:
+                hidden = S3Stream(
                     tap=self,
-                    name=root_name,
+                    name=name,
                     schema={"type": "object", "properties": dict(METADATA_PROPERTIES)},
                 )
-                root.selected = False
-                roots[root_name] = root
-                streams.append(root)
-            child = S3ChildStream(self, name, schema, root)
-            root.child_streams.append(child)
-            streams.append(child)
+                hidden.selected = False
+                streams.append(hidden)
+                built[name] = hidden
+                return hidden
+            return None
+
+        for name in sorted(specs):
+            if resolve(name, ()) is None:
+                self.logger.warning(
+                    "Stream '%s' is skipped: its parent stream '%s' is missing.",
+                    name,
+                    specs[name][0],
+                )
         return streams
+
+    @property
+    def catalog_dict(self) -> dict:
+        """The catalog, with each child stream's parent and list path.
+
+        The SDK drops metadata keys it doesn't know, so the tap adds its own
+        keys at breadcrumb `[]` here.
+        """
+        catalog = super().catalog_dict
+        extra = {
+            stream.tap_stream_id: {
+                PARENT_STREAM_METADATA: stream.parent.name,
+                LIST_PATH_METADATA: list(stream.lineage[-1]),
+            }
+            for stream in self.streams.values()
+            if isinstance(stream, S3ChildStream)
+        }
+        for entry in catalog.get("streams", []):
+            added = extra.get(entry.get("tap_stream_id"))
+            if not added:
+                continue
+            for item in entry.get("metadata", []):
+                if item.get("breadcrumb") == []:
+                    item.setdefault("metadata", {}).update(added)
+        return catalog
+
+
+def _read_raw_catalog(catalog: Any) -> Optional[dict]:
+    """Keep the catalog as JSON, with metadata keys the SDK would drop."""
+    if catalog is None:
+        return None
+    if isinstance(catalog, Catalog):
+        # A Catalog object has already lost the tap's own metadata keys.
+        return catalog.to_dict()
+    if isinstance(catalog, dict):
+        return catalog
+    with open(catalog, encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _stream_metadata(raw: Optional[dict]) -> Dict[str, dict]:
+    """Each stream's metadata at breadcrumb `[]`, from the raw catalog."""
+    found: Dict[str, dict] = {}
+    for entry in (raw or {}).get("streams", []):
+        stream_id = entry.get("tap_stream_id") or entry.get("stream")
+        for item in entry.get("metadata", []):
+            if item.get("breadcrumb") == []:
+                found[stream_id] = item.get("metadata", {})
+    return found
 
 
 if __name__ == "__main__":

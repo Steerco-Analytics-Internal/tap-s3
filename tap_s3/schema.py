@@ -319,30 +319,14 @@ def _to_string(value: Any) -> Any:
     return converted if isinstance(converted, str) else str(converted)
 
 
-def _from_json_text(value: Any) -> Any:
-    """Decode JSON text that nested data became, for an older catalog.
-
-    A catalog saved on version 1.0.0 can type a column as `object` or
-    `array`. Version 1.1.0 turns such lists into JSON text, so the text is
-    decoded back for those columns.
-    """
-    if isinstance(value, str):
-        try:
-            return json.loads(value)
-        except ValueError:
-            return value
-    return value
-
-
 def _to_object(value: Any) -> Any:
-    converted = to_json_value(_from_json_text(value))
+    converted = to_json_value(value)
     if isinstance(converted, dict):
         return converted
     raise _fail(value, OBJECT)
 
 
 def _to_array(value: Any) -> Any:
-    value = _from_json_text(value)
     if isinstance(value, (list, tuple)):
         return [to_json_value(item) for item in value]
     raise _fail(value, ARRAY)
