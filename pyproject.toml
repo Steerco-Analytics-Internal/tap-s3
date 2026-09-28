@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "tap-s3"
-version = "0.1.0"
+version = "1.1.0"
 description = "`tap-s3` is a Singer tap that reads tabular files from an AWS S3 bucket, built with the Meltano SDK for Singer Taps."
 authors = ["Steerco Analytics"]
 license = "Apache 2.0"

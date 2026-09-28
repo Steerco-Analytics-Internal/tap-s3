@@ -3,7 +3,7 @@
 import datetime
 import re
 from functools import cached_property
-from typing import Any, List, Optional, Pattern
+from typing import Any, Dict, List, Optional, Pattern, Tuple
 
 from singer_sdk import Stream, Tap
 from singer_sdk import typing as th
@@ -11,7 +11,14 @@ from singer_sdk.exceptions import ConfigValidationError
 
 from tap_s3.client import S3Bucket
 from tap_s3.layout import BucketLayout, build_layout, normalize_prefix
-from tap_s3.streams import S3Stream, infer_schema, parse_timestamp
+from tap_s3.nested import PARENT_ROW_COLUMN, ROW_KEY_COLUMN
+from tap_s3.streams import (
+    METADATA_PROPERTIES,
+    S3ChildStream,
+    S3Stream,
+    infer_schemas,
+    parse_timestamp,
+)
 
 REQUIRED_SETTINGS = ("aws_access_key_id", "aws_secret_access_key", "bucket")
 DEFAULT_LOOKBACK_MINUTES = 60
@@ -230,18 +237,61 @@ class TapS3(Tap):
         _ = self.incremental_mode
         _ = self.exclude_pattern
         if self.input_catalog:
-            return [
-                S3Stream(
-                    tap=self,
-                    name=entry.stream or entry.tap_stream_id,
-                    schema=entry.schema.to_dict(),
+            return self._streams_from_catalog()
+        streams: List[Stream] = []
+        for name, objects in sorted(self.layout.streams.items()):
+            schemas = infer_schemas(self, name, objects)
+            root = S3Stream(tap=self, name=name, schema=schemas.pop(name))
+            streams.append(root)
+            for child_name, schema in schemas.items():
+                child = S3ChildStream(self, child_name, schema, root)
+                root.child_streams.append(child)
+                streams.append(child)
+        return streams
+
+    def _streams_from_catalog(self) -> List[Stream]:
+        """Build streams from the catalog, and link each child to its root.
+
+        A child stream has `_row_key` and `_parent_row` columns. Its root is
+        the longest listed stream name that starts its name, followed by
+        `__`. When the catalog leaves the root out, the tap adds it,
+        deselected, to read the objects for the child.
+        """
+        roots: Dict[str, S3Stream] = {}
+        children: List[Tuple[str, dict]] = []
+        for entry in self.input_catalog.streams:  # type: ignore[union-attr]
+            name = entry.stream or entry.tap_stream_id
+            schema = entry.schema.to_dict()
+            properties = schema.get("properties", {})
+            if ROW_KEY_COLUMN in properties and PARENT_ROW_COLUMN in properties:
+                children.append((name, schema))
+            else:
+                roots[name] = S3Stream(tap=self, name=name, schema=schema)
+        streams: List[Stream] = list(roots.values())
+        known = set(self.layout.streams) | set(roots)
+        for name, schema in children:
+            candidates = [root for root in known if name.startswith(root + "__")]
+            if not candidates:
+                self.logger.warning(
+                    "Stream '%s' has no parent stream in the bucket. It is skipped.",
+                    name,
                 )
-                for entry in self.input_catalog.streams
-            ]
-        return [
-            S3Stream(tap=self, name=name, schema=infer_schema(self, name, objects))
-            for name, objects in sorted(self.layout.streams.items())
-        ]
+                continue
+            root_name = max(candidates, key=len)
+            root = roots.get(root_name)
+            if root is None:
+                root = S3Stream(
+                    tap=self,
+                    name=root_name,
+                    schema={"type": "object", "properties": dict(METADATA_PROPERTIES)},
+                )
+                root.selected = False
+                roots[root_name] = root
+                streams.append(root)
+            child = S3ChildStream(self, name, schema, root)
+            root.child_streams.append(child)
+            streams.append(child)
+        return streams
 
 
 if __name__ == "__main__":
