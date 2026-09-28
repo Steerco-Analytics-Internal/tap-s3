@@ -1,8 +1,9 @@
 """The tap-s3 tap class."""
 
 import datetime
+import re
 from functools import cached_property
-from typing import List, Optional
+from typing import Any, List, Optional, Pattern
 
 from singer_sdk import Stream, Tap
 from singer_sdk import typing as th
@@ -12,12 +13,36 @@ from tap_s3.layout import BucketLayout, build_layout, normalize_prefix
 from tap_s3.streams import S3Stream, infer_schema, parse_timestamp
 
 REQUIRED_SETTINGS = ("aws_access_key_id", "aws_secret_access_key", "bucket")
+DEFAULT_LOOKBACK_MINUTES = 60
+
+
+def utc_now() -> datetime.datetime:
+    """The current time in UTC. Tests replace it to pin the clock."""
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def parse_flag(value: Any, default: bool) -> bool:
+    """Read a boolean setting that Hotglue might send as a string.
+
+    `true`, `1` and `yes` mean true, in any case. Other strings mean false.
+    None and an empty string mean the default.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if not text:
+        return default
+    return text in ("true", "1", "yes")
 
 
 class TapS3(Tap):
     """Reads CSV, TSV, JSON, JSONL and Parquet files from an S3 bucket."""
 
     name = "tap-s3"
+
+    listed_at: datetime.datetime
 
     # The first five settings match the Hotglue S3 connector form, so the
     # connection form stays the same. Do not rename them.
@@ -51,7 +76,7 @@ class TapS3(Tap):
         ),
         th.Property(
             "incremental_mode",
-            th.BooleanType,
+            th.CustomType({"type": ["boolean", "string", "null"]}),
             default=True,
             description=(
                 "When true, a sync reads only objects modified after the last "
@@ -70,6 +95,25 @@ class TapS3(Tap):
             "start_date",
             th.DateTimeType,
             description="Ignore objects last modified before this date and time.",
+        ),
+        th.Property(
+            "lookback_minutes",
+            th.IntegerType,
+            default=DEFAULT_LOOKBACK_MINUTES,
+            description=(
+                "How far back each sync checks again for objects that arrived "
+                "late. The bookmark stays at least this far behind the listing "
+                "time."
+            ),
+        ),
+        th.Property(
+            "exclude_pattern",
+            th.StringType,
+            description=(
+                "A regular expression. The tap ignores objects whose key, "
+                "relative to `path_prefix`, matches it. Use it to leave out "
+                "files such as manifests."
+            ),
         ),
     ).to_dict()
 
@@ -97,9 +141,30 @@ class TapS3(Tap):
         return normalize_prefix(self.config.get("path_prefix"))
 
     @cached_property
+    def exclude_pattern(self) -> Optional[Pattern[str]]:
+        """The compiled `exclude_pattern`, or None."""
+        pattern = self.config.get("exclude_pattern")
+        if not pattern:
+            return None
+        try:
+            return re.compile(pattern)
+        except re.error as err:
+            raise ValueError(
+                f"The exclude_pattern setting is not a valid regex: {err}"
+            ) from err
+
+    @cached_property
     def layout(self) -> BucketLayout:
-        """Every stream under the prefix and its objects. Listed once per run."""
-        layout = build_layout(self.bucket.list_objects(self.prefix), self.prefix)
+        """Every stream under the prefix and its objects. Listed once per run.
+
+        `listed_at` records when the listing started. The lookback window is
+        measured back from it.
+        """
+        exclude = self.exclude_pattern
+        self.listed_at = utc_now()
+        layout = build_layout(
+            self.bucket.list_objects(self.prefix), self.prefix, exclude
+        )
         self.logger.info(
             "Found %d streams in %s.", len(layout.streams), self.uri(self.prefix)
         )
@@ -107,8 +172,21 @@ class TapS3(Tap):
 
     @property
     def incremental_mode(self) -> bool:
-        """Whether a sync skips objects at or before the bookmark."""
-        return self.config.get("incremental_mode", True) is not False
+        """Whether a sync skips objects it has already read."""
+        return parse_flag(self.config.get("incremental_mode"), default=True)
+
+    @property
+    def lookback(self) -> datetime.timedelta:
+        """The window in which late objects are still picked up."""
+        value = self.config.get("lookback_minutes")
+        minutes = DEFAULT_LOOKBACK_MINUTES if value is None else max(int(value), 0)
+        return datetime.timedelta(minutes=minutes)
+
+    @property
+    def window_start(self) -> datetime.datetime:
+        """The highest bookmark this run can write."""
+        _ = self.layout  # Listing the bucket sets listed_at.
+        return self.listed_at - self.lookback
 
     @cached_property
     def start_date(self) -> Optional[datetime.datetime]:
@@ -136,7 +214,7 @@ class TapS3(Tap):
                 for entry in self.input_catalog.streams
             ]
         return [
-            S3Stream(tap=self, name=name, schema=infer_schema(self, objects))
+            S3Stream(tap=self, name=name, schema=infer_schema(self, name, objects))
             for name, objects in sorted(self.layout.streams.items())
         ]
 

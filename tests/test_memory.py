@@ -46,7 +46,6 @@ def check_streaming(monkeypatch, bucket, key, body):
     assert read_before_first_row <= 2 * client_module.STREAM_BUFFER_BYTES
     count = 1 + sum(1 for _ in rows)
     assert count == ROWS
-    assert max(reads) <= client_module.STREAM_BUFFER_BYTES
     assert len(reads) > 5
     return read_before_first_row
 

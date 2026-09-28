@@ -3,7 +3,7 @@
 import json
 
 from click.testing import CliRunner
-from tests.conftest import CONFIG, iso, minutes, select_all
+from tests.conftest import CONFIG, iso, minutes, select_all, window_end
 
 from tap_s3.tap import TapS3
 
@@ -65,8 +65,9 @@ def test_discover_then_sync_with_catalog_and_state(bucket, tmp_path):
     record_values = [(m["stream"], m["record"]["id"]) for m in messages if m["type"] == "RECORD"]
     assert record_values == [("accounts", 1), ("contacts", 8)]
     final = messages[-1]["value"]["bookmarks"]
-    assert final["accounts"]["replication_key_value"] == iso(1)
-    assert final["contacts"]["replication_key_value"] == iso(3)
+    assert final["accounts"]["replication_key_value"] == window_end()
+    assert final["contacts"]["replication_key_value"] == window_end()
+    assert final["contacts"]["window"] == []
 
 
 def test_discover_without_credentials_fails_clearly(bucket, tmp_path):

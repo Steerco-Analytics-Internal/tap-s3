@@ -11,7 +11,7 @@ import pytest
 from tests.conftest import discover, gzipped, records, schemas, select_all, sync
 
 from tap_s3.client import S3Bucket
-from tap_s3.formats import column_names, json_records, sniff_delimiter, split_file_name
+from tap_s3.formats import column_names, sniff_delimiter, split_file_name
 from tap_s3.streams import ObjectParseError
 
 ROWS = [{"id": 1, "name": "Ada"}, {"id": 2, "name": "Grace"}]
@@ -96,6 +96,17 @@ def test_split_file_name_rejects(file_name):
     assert split_file_name(file_name) is None
 
 
+def assert_fails_loudly(tap_logs, key, message):
+    """Discovery logs and skips the object. A sync fails on it."""
+    uri = f"s3://tap-s3-test/{key}"
+    catalog = discover()
+    assert any(uri in line and message in line for line in tap_logs), tap_logs
+    with pytest.raises(ObjectParseError) as caught:
+        sync(select_all(catalog))
+    assert uri in str(caught.value)
+    assert message in str(caught.value)
+
+
 def sync_one(bucket, key, body):
     bucket.put(key, body)
     catalog = discover()
@@ -125,12 +136,6 @@ def test_cp1252_after_many_utf8_rows(bucket):
     assert rows[0] == {"id": 1, "name": "row 1"}
     assert rows[-1] == {"id": 5001, "name": "Café"}
     assert [r["id"] for r in rows] == list(range(1, 5002))
-
-
-def test_csv_that_is_neither_utf8_nor_cp1252_fails(bucket):
-    bucket.put("broken.csv", b"id,name\n1,\x81\x8d\n")
-    with pytest.raises(ObjectParseError, match="s3://tap-s3-test/broken.csv"):
-        discover()
 
 
 def test_csv_without_a_trailing_newline(bucket):
@@ -245,19 +250,27 @@ def test_json_wrapper_with_only_an_empty_array(bucket):
         ('{"a": [{"x": 1}], "b": [{"y": 2}]}', "more than one array"),
         ('{"a": 1}', "no single field"),
         ('[{"a": 1}, 2]', "item 2 of the array is not a JSON object"),
-        ('[{"a": 1}', "JSONDecodeError"),
+        ('[{"a": 1}', "IncompleteJSONError"),
+        ('[{"a": 1}] trailing', "IncompleteJSONError"),
+        ("   ", "IncompleteJSONError"),
+        ('{"a": [{"x": 1}, 2]}', "item 2 of field 'a' is not a JSON object"),
     ],
 )
-def test_bad_json_fails_with_the_key(bucket, document, message):
-    bucket.put("bad.json", document)
-    with pytest.raises(ObjectParseError) as caught:
-        discover()
-    assert "s3://tap-s3-test/bad.json" in str(caught.value)
-    assert message in str(caught.value)
+def test_bad_json_fails_with_the_key(bucket, tap_logs, document, message):
+    bucket.put("bad.json", document or " ")
+    assert_fails_loudly(tap_logs, "bad.json", message)
 
 
-def test_json_records_accepts_lists():
-    assert json_records([]) == []
+def test_json_wrapper_skips_other_fields(bucket):
+    document = {
+        "meta": {"page": {"size": 2}},
+        "ids": [1, 2, [3]],
+        "names": ["x"],
+        "data": ROWS,
+        "empty": [],
+    }
+    _, rows = sync_one(bucket, "people.json", json.dumps(document))
+    assert rows == ROWS
 
 
 def test_jsonl_with_blank_lines(bucket):
@@ -273,12 +286,9 @@ def test_jsonl_with_blank_lines(bucket):
         ('{"id": 1}\n[1, 2]\n', "line 2 is not a JSON object"),
     ],
 )
-def test_bad_jsonl_fails_with_the_key_and_line(bucket, body, message):
+def test_bad_jsonl_fails_with_the_key_and_line(bucket, tap_logs, body, message):
     bucket.put("bad.jsonl", body)
-    with pytest.raises(ObjectParseError) as caught:
-        discover()
-    assert "s3://tap-s3-test/bad.jsonl" in str(caught.value)
-    assert message in str(caught.value)
+    assert_fails_loudly(tap_logs, "bad.jsonl", message)
 
 
 def typed_parquet_table():
@@ -368,29 +378,22 @@ def test_parquet_reads_by_row_group(bucket, monkeypatch):
     assert [row["id"] for row in rows] == list(range(1, 101))
 
 
-def test_truncated_gzip_fails_with_the_key(bucket):
+def test_truncated_gzip_fails_with_the_key(bucket, tap_logs):
     body = gzipped(as_csv() * 2000)
     bucket.put("accounts.csv.gz", body[: len(body) // 2])
-    with pytest.raises(ObjectParseError) as caught:
-        discover()
-    assert "s3://tap-s3-test/accounts.csv.gz" in str(caught.value)
-    assert "EOFError" in str(caught.value)
+    assert_fails_loudly(tap_logs, "accounts.csv.gz", "EOFError")
 
 
-def test_not_gzip_at_all_fails_with_the_key(bucket):
+def test_not_gzip_at_all_fails_with_the_key(bucket, tap_logs):
     bucket.put("accounts.csv.gz", as_csv())
-    with pytest.raises(ObjectParseError, match="s3://tap-s3-test/accounts.csv.gz"):
-        discover()
+    assert_fails_loudly(tap_logs, "accounts.csv.gz", "BadGzipFile")
 
 
 @pytest.mark.parametrize("key", ["bad.parquet", "bad.parquet.gz"])
-def test_invalid_parquet_fails_with_the_key(bucket, key):
+def test_invalid_parquet_fails_with_the_key(bucket, tap_logs, key):
     body = b"PAR1 this is not parquet" * 10
     bucket.put(key, gzipped(body) if key.endswith(".gz") else body)
-    with pytest.raises(ObjectParseError) as caught:
-        discover()
-    assert f"s3://tap-s3-test/{key}" in str(caught.value)
-    assert "ArrowInvalid" in str(caught.value)
+    assert_fails_loudly(tap_logs, key, "ArrowInvalid")
 
 
 def test_range_reader_seeks_and_reads(bucket):

@@ -15,7 +15,7 @@ import datetime
 import logging
 import re
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Pattern, Set, Tuple
 
 from tap_s3.formats import FileFormat, split_file_name
 
@@ -41,6 +41,7 @@ class S3Object:
     key: str
     last_modified: datetime.datetime
     size: int
+    etag: str
     file_format: FileFormat
     stream_name: str
 
@@ -92,29 +93,38 @@ def is_hidden(relative_key: str) -> bool:
     return any(segment.startswith((".", "_")) for segment in relative_key.split("/"))
 
 
+def raw_stream_name(relative_key: str, stem: str) -> str:
+    """The stream name before sanitizing: the top-level folder, or the stem."""
+    segments = relative_key.split("/")
+    if len(segments) > 1:
+        return segments[0]
+    return strip_trailing_tokens(stem)
+
+
 def stream_name_for(relative_key: str, stem: str) -> Optional[str]:
     """Name the stream for a key relative to the prefix.
 
     Returns None when nothing in the name survives sanitizing.
     """
-    segments = relative_key.split("/")
-    if len(segments) > 1:
-        name = sanitize_name(segments[0])
-    else:
-        name = sanitize_name(strip_trailing_tokens(stem))
-    return name or None
+    return sanitize_name(raw_stream_name(relative_key, stem)) or None
 
 
-def build_layout(listing: Iterable[dict], prefix: str) -> BucketLayout:
+def build_layout(
+    listing: Iterable[dict],
+    prefix: str,
+    exclude: Optional[Pattern[str]] = None,
+) -> BucketLayout:
     """Group listed objects into streams.
 
     `listing` holds ListObjectsV2 `Contents` entries. Folder markers,
-    zero-byte objects and hidden files are left out. Objects with an
-    unsupported extension, or a name with no usable characters, are
-    collected in `unsupported_keys` and logged in one warning.
+    zero-byte objects, hidden files and keys that match `exclude` are left
+    out. Objects with an unsupported extension, or a name with no usable
+    characters, are collected in `unsupported_keys` and logged in one warning.
     """
     streams: Dict[str, List[S3Object]] = {}
+    raw_names: Dict[str, Set[str]] = {}
     unsupported: List[str] = []
+    excluded = 0
     for entry in listing:
         key = entry["Key"]
         relative = key[len(prefix) :]
@@ -122,22 +132,38 @@ def build_layout(listing: Iterable[dict], prefix: str) -> BucketLayout:
             continue
         if is_hidden(relative):
             continue
+        if exclude is not None and exclude.search(relative):
+            excluded += 1
+            continue
         split = split_file_name(relative.rsplit("/", 1)[-1])
-        name = stream_name_for(relative, split[0]) if split else None
-        if split is None or name is None:
+        raw_name = raw_stream_name(relative, split[0]) if split else ""
+        name = sanitize_name(raw_name)
+        if split is None or not name:
             unsupported.append(key)
             continue
+        raw_names.setdefault(name, set()).add(raw_name)
         streams.setdefault(name, []).append(
             S3Object(
                 key=key,
                 last_modified=entry["LastModified"],
                 size=entry["Size"],
+                etag=entry.get("ETag", ""),
                 file_format=split[1],
                 stream_name=name,
             )
         )
     for objects in streams.values():
         objects.sort(key=lambda obj: obj.sort_key)
+    if excluded:
+        LOGGER.info("Excluded %d objects that match exclude_pattern.", excluded)
+    for name, raws in sorted(raw_names.items()):
+        if len(raws) > 1:
+            LOGGER.warning(
+                "Stream '%s' merges objects from differently named sources: %s. "
+                "Rename the folders or files if they hold different data.",
+                name,
+                ", ".join(repr(raw) for raw in sorted(raws)),
+            )
     if unsupported:
         shown = unsupported[:MAX_LOGGED_KEYS]
         more = len(unsupported) - len(shown)

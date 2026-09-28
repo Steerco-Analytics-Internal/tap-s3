@@ -39,7 +39,9 @@ def test_secret_is_marked_secret():
 
 def test_optional_key_types():
     properties = TapS3.config_jsonschema["properties"]
-    assert properties["incremental_mode"]["type"] == ["boolean", "null"]
+    assert properties["incremental_mode"]["type"] == ["boolean", "string", "null"]
+    assert properties["lookback_minutes"]["default"] == 60
+    assert properties["exclude_pattern"]["type"] == ["string", "null"]
     assert properties["incremental_mode"]["default"] is True
     assert properties["path_prefix"]["type"] == ["string", "null"]
     assert properties["start_date"]["format"] == "date-time"
@@ -60,3 +62,20 @@ def test_about_runs_from_the_command_line():
     )
     assert '"name": "tap-s3"' in result.stdout
     assert "aws_secret_access_key" in result.stdout
+
+
+def test_parse_flag_defaults():
+    from tap_s3.tap import parse_flag
+
+    assert parse_flag(None, default=True) is True
+    assert parse_flag(None, default=False) is False
+    assert parse_flag("  ", default=True) is True
+
+
+def test_utc_now_is_aware(monkeypatch):
+    import datetime
+
+    import tap_s3.tap
+
+    monkeypatch.undo()
+    assert tap_s3.tap.utc_now().tzinfo == datetime.timezone.utc

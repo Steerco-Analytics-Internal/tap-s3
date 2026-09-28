@@ -15,6 +15,7 @@ from tests.conftest import (
     records,
     select_all,
     sync,
+    window_end,
 )
 
 from tap_s3.streams import ObjectParseError
@@ -37,7 +38,7 @@ def test_objects_are_read_oldest_first(bucket):
     assert keys(messages) == ["orders/z.csv", "orders/m.csv", "orders/a.csv"]
     stream_records = records(messages, "orders")
     assert [r["_s3_last_modified"] for r in stream_records] == [iso(1), iso(2), iso(3)]
-    assert bookmark(messages, "orders") == iso(3)
+    assert bookmark(messages, "orders") == window_end()
 
 
 def test_bookmark_moves_after_each_object(bucket):
@@ -53,7 +54,8 @@ def test_bookmark_moves_after_each_object(bucket):
         for m in messages
         if m["type"] in ("RECORD", "STATE")
     ]
-    # The SDK writes an empty STATE first and a final STATE last.
+    # The SDK writes an empty STATE first and a final STATE last. Once every
+    # object is read, the bookmark moves to the start of the lookback window.
     assert sequence == [
         ("STATE", None),
         ("RECORD", "orders/a.csv"),
@@ -61,30 +63,34 @@ def test_bookmark_moves_after_each_object(bucket):
         ("STATE", iso(1)),
         ("RECORD", "orders/b.csv"),
         ("STATE", iso(2)),
-        ("STATE", iso(2)),
+        ("STATE", window_end()),
+        ("STATE", window_end()),
     ]
 
 
-def test_bookmark_across_two_runs_with_new_and_modified_objects(bucket):
+def test_bookmark_across_two_runs_with_new_and_modified_objects(bucket, clock):
     bucket.put("orders/a.csv", "id\n1\n", minutes(1))
     bucket.put("orders/b.csv", "id\n2\n", minutes(2))
     catalog = select_all(discover())
+    clock(62)
     first = sync(catalog)
     assert keys(first) == ["orders/a.csv", "orders/b.csv"]
     state = last_state(first)
     assert state["bookmarks"]["orders"]["replication_key"] == "_s3_last_modified"
     assert state["bookmarks"]["orders"]["replication_key_value"] == iso(2)
+    assert state["bookmarks"]["orders"]["window"] == []
 
     bucket.put("orders/c.csv", "id\n3\n", minutes(3))
     bucket.put("orders/a.csv", "id\n1\n10\n", minutes(4))
+    clock(70)
     second = sync(catalog, state=state)
     assert keys(second) == ["orders/c.csv", "orders/a.csv"]
     assert [r["id"] for r in records(second, "orders")] == [3, 1, 10]
-    assert bookmark(second, "orders") == iso(4)
+    assert bookmark(second, "orders") == iso(10)
 
     third = sync(catalog, state=last_state(second))
     assert records(third) == []
-    assert bookmark(third, "orders") == iso(4)
+    assert bookmark(third, "orders") == iso(10)
 
 
 def test_object_at_the_bookmark_is_skipped(bucket):
@@ -116,7 +122,7 @@ def test_incremental_mode_false_reads_everything(bucket):
                                       "replication_key_value": iso(2)}}}
     messages = sync(state=state, incremental_mode=False)
     assert keys(messages) == ["orders/a.csv", "orders/b.csv"]
-    assert bookmark(messages, "orders") == iso(2)
+    assert bookmark(messages, "orders") == window_end()
 
 
 def test_start_date_ignores_older_objects(bucket):
@@ -142,7 +148,7 @@ def test_header_only_object_still_moves_the_bookmark(bucket):
     bucket.put("orders/b.csv", "id\n", minutes(2))
     messages = sync()
     assert keys(messages) == ["orders/a.csv"]
-    assert bookmark(messages, "orders") == iso(2)
+    assert bookmark(messages, "orders") == window_end()
 
 
 def test_bookmark_waits_for_every_object_with_the_same_timestamp(bucket):

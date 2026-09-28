@@ -9,6 +9,7 @@ import base64
 import datetime
 import decimal
 import json
+import math
 import re
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
@@ -149,12 +150,19 @@ class ColumnTypes:
     Columns keep the order in which they are first seen.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, rename: Callable[[str], str] = str) -> None:
         self.types: Dict[str, str] = {}
+        self.rename = rename
 
     def observe(self, name: str, column_type: str) -> None:
-        """Record one observed type for a column."""
+        """Record one observed type for a column, under its renamed name."""
+        name = self.rename(name)
         self.types[name] = merge_types(self.types.get(name, EMPTY), column_type)
+
+    def merge(self, other: "ColumnTypes") -> None:
+        """Add the columns that another collector found."""
+        for name, column_type in other.types.items():
+            self.types[name] = merge_types(self.types.get(name, EMPTY), column_type)
 
     def observe_columns(self, names: Iterable[str]) -> None:
         """Record columns that exist but have no values yet."""
@@ -210,8 +218,29 @@ def schema_type(prop: dict) -> Optional[str]:
     return None
 
 
+def is_not_finite(value: Any) -> bool:
+    """True for NaN and infinite floats or decimals, which JSON can't hold."""
+    if isinstance(value, float):
+        return not math.isfinite(value)
+    if isinstance(value, decimal.Decimal):
+        return not value.is_finite()
+    return False
+
+
+def iso_utc(value: datetime.datetime) -> str:
+    """Format a datetime with an offset. A naive value is taken as UTC."""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=datetime.timezone.utc)
+    return value.isoformat()
+
+
 def to_json_value(value: Any) -> Any:
-    """Convert a nested value into plain JSON values."""
+    """Convert a nested value into plain JSON values.
+
+    NaN and infinity become None. A naive datetime is taken as UTC.
+    """
+    if is_not_finite(value):
+        return None
     if isinstance(value, dict):
         return {str(key): to_json_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
@@ -219,7 +248,9 @@ def to_json_value(value: Any) -> Any:
             # PyArrow returns a Parquet map as a list of key and value pairs.
             return {str(key): to_json_value(item) for key, item in value}
         return [to_json_value(item) for item in value]
-    if isinstance(value, (datetime.datetime, datetime.date, datetime.time)):
+    if isinstance(value, datetime.datetime):
+        return iso_utc(value)
+    if isinstance(value, (datetime.date, datetime.time)):
         return value.isoformat()
     if isinstance(value, bytes):
         return base64.b64encode(value).decode("ascii")
@@ -267,13 +298,13 @@ def _to_boolean(value: Any) -> Any:
 
 def _to_date_time(value: Any) -> Any:
     if isinstance(value, datetime.datetime):
-        return value.isoformat()
+        return iso_utc(value)
     if isinstance(value, datetime.date):
-        return datetime.datetime.combine(value, datetime.time()).isoformat()
+        return iso_utc(datetime.datetime.combine(value, datetime.time()))
     if isinstance(value, str):
         parsed = parse_iso_datetime(value)
         if parsed is not None:
-            return parsed.isoformat()
+            return iso_utc(parsed)
     raise _fail(value, DATE_TIME)
 
 
@@ -330,12 +361,19 @@ class RecordConverter:
     Columns that are not in the schema are left out. `dropped` holds their
     names, so the stream can log them. A schema column that the row lacks is
     set to None, so every record has the same keys.
+
+    An empty string is None in every column that isn't a string, the same as
+    during inference. NaN and infinity are None in every column.
     """
 
     def __init__(self, properties: Dict[str, dict]) -> None:
-        self.converters = {
-            name: _CONVERTERS[schema_type(prop)] for name, prop in properties.items()
-        }
+        self.converters = {}
+        self.blank_is_null = set()
+        for name, prop in properties.items():
+            kind = schema_type(prop)
+            self.converters[name] = _CONVERTERS[kind]
+            if kind not in (STRING, None):
+                self.blank_is_null.add(name)
 
     def convert(self, row: Dict[str, Any]) -> "ConvertedRow":
         """Convert one row. Raise ValueConversionError on a type mismatch."""
@@ -346,7 +384,11 @@ class RecordConverter:
             if converter is None:
                 dropped.append(name)
                 continue
-            if value is None:
+            if (
+                value is None
+                or is_not_finite(value)
+                or (value == "" and name in self.blank_is_null)
+            ):
                 record[name] = None
                 continue
             try:

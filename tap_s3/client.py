@@ -156,6 +156,7 @@ class S3ObjectSource(ObjectSource):
         self.key = key
         self.size = size
         self.compressed = compressed
+        self.description = f"s3://{bucket}/{key}"
 
     @contextlib.contextmanager
     def open(self) -> Iterator[BinaryIO]:

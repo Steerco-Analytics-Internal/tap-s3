@@ -8,7 +8,17 @@ import contextlib
 import datetime
 import itertools
 import logging
-from typing import TYPE_CHECKING, Any, Dict, Iterable, Iterator, List, Optional
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Optional,
+    Set,
+    Tuple,
+)
 
 from botocore.exceptions import BotoCoreError, ClientError
 from singer_sdk import Stream
@@ -33,6 +43,8 @@ METADATA_PROPERTIES = {
 
 SAMPLE_OBJECTS = 5
 SAMPLE_ROWS = 1000
+
+WINDOW_STATE_KEY = "window"
 
 
 class ObjectParseError(Exception):
@@ -70,32 +82,83 @@ def parse_timestamp(text: str) -> datetime.datetime:
     return to_utc(datetime.datetime.fromisoformat(cleaned))
 
 
-def infer_schema(tap: "TapS3", objects: List[S3Object]) -> dict:
+def source_column_name(name: str) -> str:
+    """Rename a source column that has a metadata column's name.
+
+    The metadata columns form the primary key, so they keep their names.
+    """
+    return f"{name}_source" if name in METADATA_PROPERTIES else name
+
+
+def rename_metadata_columns(row: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+    """Rename source columns that clash with metadata columns in one row."""
+    clashes = [name for name in row if name in METADATA_PROPERTIES]
+    if not clashes:
+        return row, []
+    return {source_column_name(name): value for name, value in row.items()}, clashes
+
+
+def warn_renamed(logger: logging.Logger, stream: str, clashes: Iterable[str]) -> None:
+    """Log the source columns that were renamed for one stream."""
+    logger.warning(
+        "Stream '%s' has source columns named like metadata columns. They are "
+        "renamed: %s.",
+        stream,
+        ", ".join(f"{name} to {source_column_name(name)}" for name in sorted(clashes)),
+    )
+
+
+def infer_schema(tap: "TapS3", name: str, objects: List[S3Object]) -> dict:
     """Build a stream's schema from its most recent objects.
 
-    Samples the newest SAMPLE_OBJECTS objects and up to SAMPLE_ROWS rows from
-    each. Parquet columns come from the file's own schema.
+    Samples the newest SAMPLE_OBJECTS objects that parse, and up to
+    SAMPLE_ROWS rows from each. An object that can't be parsed is logged and
+    skipped, so one bad file doesn't stop discovery. Parquet columns come from
+    the file's own schema.
     """
-    columns = ColumnTypes()
+    clashes: Set[str] = set()
+
+    def rename(column: str) -> str:
+        if column in METADATA_PROPERTIES:
+            clashes.add(column)
+        return source_column_name(column)
+
+    columns = ColumnTypes(rename)
     newest_first = sorted(objects, key=lambda obj: obj.sort_key, reverse=True)
-    for obj in newest_first[:SAMPLE_OBJECTS]:
-        source = tap.bucket.source(obj.key, obj.size, obj.file_format.compressed)
-        with parse_errors(tap.uri(obj.key)):
-            if obj.file_format.kind == PARQUET:
-                columns.observe_arrow_schema(parquet_schema(source))
-                continue
-            rows = iter_rows(source, obj.file_format, columns.observe_columns)
-            observe = (
-                columns.observe_json_row
-                if obj.file_format.kind != DELIMITED
-                else columns.observe_text_row
-            )
-            with contextlib.closing(rows):  # type: ignore[type-var]
-                for row in itertools.islice(rows, SAMPLE_ROWS):
-                    observe(row)
+    sampled = 0
+    for obj in newest_first:
+        if sampled == SAMPLE_OBJECTS:
+            break
+        attempt = ColumnTypes(rename)
+        try:
+            _sample_object(tap, obj, attempt)
+        except ObjectParseError as err:
+            LOGGER.warning("Discovery skipped %s: %s", tap.uri(obj.key), err)
+            continue
+        columns.merge(attempt)
+        sampled += 1
+    if clashes:
+        warn_renamed(LOGGER, name, clashes)
     properties = columns.properties()
     properties.update(METADATA_PROPERTIES)
     return {"type": "object", "properties": properties}
+
+
+def _sample_object(tap: "TapS3", obj: S3Object, columns: ColumnTypes) -> None:
+    source = tap.bucket.source(obj.key, obj.size, obj.file_format.compressed)
+    with parse_errors(tap.uri(obj.key)):
+        if obj.file_format.kind == PARQUET:
+            columns.observe_arrow_schema(parquet_schema(source))
+            return
+        rows = iter_rows(source, obj.file_format, columns.observe_columns)
+        observe = (
+            columns.observe_json_row
+            if obj.file_format.kind != DELIMITED
+            else columns.observe_text_row
+        )
+        with contextlib.closing(rows):  # type: ignore[type-var]
+            for row in itertools.islice(rows, SAMPLE_ROWS):
+                observe(row)
 
 
 class S3Stream(Stream):
@@ -108,30 +171,49 @@ class S3Stream(Stream):
     def __init__(self, tap: "TapS3", name: str, schema: dict) -> None:
         super().__init__(tap=tap, name=name, schema=schema)
         self._reported_dropped = False
+        self._reported_renamed = False
 
     @property
     def s3_tap(self) -> "TapS3":
         """The tap, typed as TapS3."""
         return self._tap  # type: ignore[return-value]
 
+    @property
+    def is_incremental(self) -> bool:
+        """True unless the config or the catalog asks for a full read."""
+        return self.s3_tap.incremental_mode and self.replication_method != "FULL_TABLE"
+
     def get_records(self, context: Optional[dict]) -> Iterable[Dict[str, Any]]:
         """Yield rows object by object, oldest first.
 
+        S3 LastModified has one-second resolution, and a multipart upload
+        keeps the time it started. So an object can appear after a later
+        bookmark was written. To catch it, the bookmark never passes the
+        listing time minus `lookback_minutes`. Objects read inside that
+        window are kept in state by key and ETag, and are skipped next time.
+
         The bookmark moves after each object's last row. When several objects
         share a LastModified value, it moves after the last of them, so a
-        failure between them cannot skip one on the next run.
+        failure between them can't skip one on the next run.
         """
-        objects = self._objects_to_read(context)
+        state = self.get_context_state(context)
+        window_start = self.s3_tap.window_start
+        objects = self._objects_to_read(state)
         converter = RecordConverter(self.schema["properties"])
         for index, obj in enumerate(objects):
             yield from self._object_records(obj, converter)
             following = objects[index + 1] if index + 1 < len(objects) else None
-            if following is None or following.last_modified > obj.last_modified:
-                self._advance_bookmark(context, obj.last_modified)
+            shares_time = (
+                following is not None and following.last_modified == obj.last_modified
+            )
+            bookmark = None if shares_time else min(obj.last_modified, window_start)
+            self._save_progress(state, bookmark, obj)
         if not objects:
             self.logger.info("No new objects for stream '%s'.", self.name)
+        # Every listed object up to the window start is now read or skipped.
+        self._save_progress(state, window_start, None)
 
-    def _objects_to_read(self, context: Optional[dict]) -> List[S3Object]:
+    def _objects_to_read(self, state: dict) -> List[S3Object]:
         tap = self.s3_tap
         objects = sorted(
             tap.layout.streams.get(self.name, []), key=lambda obj: obj.sort_key
@@ -139,10 +221,16 @@ class S3Stream(Stream):
         start_date = tap.start_date
         if start_date is not None:
             objects = [obj for obj in objects if obj.last_modified >= start_date]
-        bookmark = self._bookmark(context) if tap.incremental_mode else None
-        if bookmark is not None:
-            objects = [obj for obj in objects if obj.last_modified > bookmark]
-        return objects
+        if not self.is_incremental:
+            return objects
+        bookmark = self._bookmark(state)
+        already_read = {(item["key"], item["etag"]) for item in _window(state)}
+        return [
+            obj
+            for obj in objects
+            if (bookmark is None or obj.last_modified > bookmark)
+            and (obj.key, obj.etag) not in already_read
+        ]
 
     def _object_records(
         self, obj: S3Object, converter: RecordConverter
@@ -156,13 +244,18 @@ class S3Stream(Stream):
             rows = iter_rows(source, obj.file_format)
             with contextlib.closing(rows):  # type: ignore[type-var]
                 for row_number, row in enumerate(rows, 1):
+                    row, clashes = rename_metadata_columns(row)
+                    if clashes and not self._reported_renamed:
+                        self._reported_renamed = True
+                        warn_renamed(self.logger, self.name, clashes)
                     try:
                         converted = converter.convert(row)
                     except ValueConversionError as err:
                         raise ObjectParseError(
                             f"Could not parse {uri} row {row_number}: {err}. "
-                            "The catalog schema expects another type. Fix the "
-                            "file, or run discovery again and refresh the catalog."
+                            "The value doesn't match the column's type in the "
+                            "catalog. To sync this object, fix the file or change "
+                            "the column's type in the catalog."
                         ) from err
                     self._report_dropped(converted.dropped, uri)
                     record = converted.record
@@ -172,30 +265,59 @@ class S3Stream(Stream):
                     yield record
 
     def _report_dropped(self, dropped: List[str], uri: str) -> None:
-        columns = [name for name in dropped if name not in METADATA_PROPERTIES]
-        if columns and not self._reported_dropped:
+        if dropped and not self._reported_dropped:
             self._reported_dropped = True
             self.logger.warning(
                 "Stream '%s' drops columns that are not in the catalog schema: %s. "
                 "First seen in %s. This warning shows once per stream.",
                 self.name,
-                ", ".join(columns),
+                ", ".join(dropped),
                 uri,
             )
 
-    def _bookmark(self, context: Optional[dict]) -> Optional[datetime.datetime]:
-        state = self.get_context_state(context)
+    @staticmethod
+    def _bookmark(state: dict) -> Optional[datetime.datetime]:
         if state.get("replication_key") not in (None, LAST_MODIFIED_COLUMN):
             return None
         value = state.get("replication_key_value")
         return parse_timestamp(value) if value else None
 
-    def _advance_bookmark(
-        self, context: Optional[dict], last_modified: datetime.datetime
+    def _save_progress(
+        self,
+        state: dict,
+        bookmark: Optional[datetime.datetime],
+        read: Optional[S3Object],
     ) -> None:
-        state = self.get_context_state(context)
-        state["replication_key"] = LAST_MODIFIED_COLUMN
-        state["replication_key_value"] = last_modified.isoformat()
+        """Record a finished object and move the bookmark, then write state.
+
+        The bookmark only moves forward. Window entries at or before it are
+        pruned, because the bookmark filter already skips those objects.
+        """
+        current = self._bookmark(state)
+        if bookmark is not None and (current is None or bookmark > current):
+            current = bookmark
+        window = [
+            item
+            for item in _window(state)
+            if read is None or (item["key"], item["etag"]) != (read.key, read.etag)
+        ]
+        if read is not None:
+            window.append(
+                {
+                    "key": read.key,
+                    "etag": read.etag,
+                    "last_modified": read.last_modified.isoformat(),
+                }
+            )
+        if current is not None:
+            window = [
+                item
+                for item in window
+                if parse_timestamp(item["last_modified"]) > current
+            ]
+            state["replication_key"] = LAST_MODIFIED_COLUMN
+            state["replication_key_value"] = current.isoformat()
+        state[WINDOW_STATE_KEY] = window
         # The SDK only flushes state after it writes a record. Mark it dirty so
         # an object with no rows still moves the bookmark.
         self._is_state_flushed = False
@@ -209,3 +331,8 @@ class S3Stream(Stream):
         The SDK moves it per record by default, which would bookmark an object
         before all of its rows were emitted.
         """
+
+
+def _window(state: dict) -> List[Dict[str, str]]:
+    """The objects read inside the lookback window, from state."""
+    return list(state.get(WINDOW_STATE_KEY) or [])

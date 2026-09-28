@@ -28,6 +28,9 @@ CONFIG = {
 }
 
 
+NOW_OFFSET = 24 * 60
+
+
 def minutes(offset: int) -> datetime.datetime:
     """A naive UTC timestamp `offset` minutes after BASE_TIME."""
     return BASE_TIME + datetime.timedelta(minutes=offset)
@@ -78,6 +81,27 @@ def aws(monkeypatch):
     monkeypatch.delenv("AWS_PROFILE", raising=False)
     with mock_aws():
         yield
+
+
+@pytest.fixture(autouse=True)
+def clock(monkeypatch):
+    """Pin the tap's clock. Call the fixture with an offset to move it.
+
+    By default, the clock reads one day after BASE_TIME, so the lookback
+    window ends well after every test object.
+    """
+
+    def set_now(offset: int) -> None:
+        now = minutes(offset).replace(tzinfo=datetime.timezone.utc)
+        monkeypatch.setattr("tap_s3.tap.utc_now", lambda: now, raising=False)
+
+    set_now(NOW_OFFSET)
+    return set_now
+
+
+def window_end(lookback: int = 60) -> str:
+    """The bookmark a finished sync writes with the default clock."""
+    return iso(NOW_OFFSET - lookback)
 
 
 @pytest.fixture

@@ -5,6 +5,7 @@ None for an empty cell. JSON readers yield decoded JSON values. The Parquet
 reader yields the Python values that PyArrow produces.
 """
 
+import collections
 import csv
 import io
 import json
@@ -22,6 +23,7 @@ from typing import (
     Tuple,
 )
 
+import ijson
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -46,6 +48,9 @@ FORMAT_BY_EXTENSION = {
     ".parquet": PARQUET,
 }
 
+UTF8_BOM = b"\xef\xbb\xbf"
+DELIMITED_ENCODINGS = ("utf-8", "cp1252")
+LAST_RESORT_ENCODING = "latin-1"
 SNIFF_CHARS = 16 * 1024
 PARQUET_BATCH_ROWS = 10_000
 CANDIDATE_DELIMITERS = ",\t;|"
@@ -85,7 +90,10 @@ class ObjectSource:
 
     `open` gives the decompressed bytes as a forward-only stream. `open_seekable`
     gives a seekable file, which Parquet needs. Both are context managers.
+    `description` names the object in log messages.
     """
+
+    description = "the object"
 
     def open(self) -> ContextManager[BinaryIO]:  # pragma: no cover
         raise NotImplementedError
@@ -118,22 +126,39 @@ def iter_rows(
 def _read_delimited(
     source: ObjectSource, file_format: FileFormat, on_header: HeaderCallback
 ) -> Iterator[Dict[str, Any]]:
-    """Read a delimited file as UTF-8, and fall back to cp1252.
+    """Read a delimited file as UTF-8, then cp1252, then latin-1.
 
-    The file is streamed, so a decode error can come after some rows. The
+    The file is streamed, so a decode error can come after some rows. Each
     fallback reopens the object and skips the rows that were already yielded.
-    Row boundaries are the same in both encodings, because both are ASCII
-    compatible.
+    Row boundaries are the same in every encoding, because all of them are
+    ASCII compatible. Latin-1 maps every byte, so the last pass can't fail.
     """
     yielded = 0
-    try:
-        for row in _delimited_rows(source, file_format, "utf-8-sig", 0, on_header):
-            yielded += 1
-            yield row
-        return
-    except UnicodeDecodeError as err:
-        LOGGER.warning("The file is not valid UTF-8 (%s). Reading it as cp1252.", err)
-    yield from _delimited_rows(source, file_format, "cp1252", yielded, on_header)
+    for encoding in DELIMITED_ENCODINGS:
+        try:
+            for row in _delimited_rows(source, file_format, encoding, yielded, on_header):
+                yielded += 1
+                yield row
+            return
+        except UnicodeDecodeError as err:
+            LOGGER.warning(
+                "%s is not valid %s (%s). Reading it with the next encoding.",
+                source.description,
+                encoding,
+                err,
+            )
+    yield from _delimited_rows(
+        source, file_format, LAST_RESORT_ENCODING, yielded, on_header
+    )
+
+
+def skip_bom(raw: BinaryIO) -> None:
+    """Move past a UTF-8 byte order mark, if the stream starts with one.
+
+    This runs on the raw bytes, so no decoder sees the mark.
+    """
+    if raw.peek(len(UTF8_BOM))[: len(UTF8_BOM)] == UTF8_BOM:  # type: ignore[attr-defined]
+        raw.read(len(UTF8_BOM))
 
 
 def _delimited_rows(
@@ -144,6 +169,7 @@ def _delimited_rows(
     on_header: HeaderCallback,
 ) -> Iterator[Dict[str, Any]]:
     with source.open() as raw:
+        skip_bom(raw)
         text = io.TextIOWrapper(raw, encoding=encoding, newline="")
         head = text.read(SNIFF_CHARS)
         delimiter = sniff_delimiter(head, file_format.extension)
@@ -224,43 +250,105 @@ def column_names(header: List[str]) -> List[str]:
     return names
 
 
+_CONTAINER_STARTS = ("start_map", "start_array")
+_CONTAINER_ENDS = ("end_map", "end_array")
+
+
 def _read_json(source: ObjectSource) -> Iterator[Dict[str, Any]]:
-    with source.open() as raw:
-        document = json.load(io.TextIOWrapper(raw, encoding="utf-8-sig"))
-    for index, item in enumerate(json_records(document), 1):
-        if not isinstance(item, dict):
-            raise ValueError(f"item {index} of the array is not a JSON object")
-        yield item
+    """Stream the records of a JSON document with ijson.
 
-
-def json_records(document: Any) -> List[Any]:
-    """Find the array of records in a JSON document.
-
-    The document is either an array, or an object with one field that holds
-    an array of objects. Other scalar fields on the wrapper are ignored.
+    The document is an array of objects, or an object with one field that
+    holds an array of objects. Other fields on the wrapper are ignored.
     """
-    if isinstance(document, list):
-        return document
-    if not isinstance(document, dict):
-        raise ValueError("the JSON document is not an array or an object")
-    arrays = [
-        name
-        for name, value in document.items()
-        if isinstance(value, list) and all(isinstance(item, dict) for item in value)
-    ]
-    filled = [name for name in arrays if document[name]]
-    if len(filled) == 1:
-        return document[filled[0]]
-    if len(filled) > 1:
-        raise ValueError(f"the JSON object has more than one array of objects: {filled}")
-    if len(arrays) == 1:
-        return []
-    raise ValueError("the JSON object has no single field that holds an array of objects")
+    with source.open() as raw:
+        skip_bom(raw)
+        events = iter(ijson.parse(raw, use_float=True))
+        _, event, _ = next(events)
+        if event == "start_array":
+            yield from _array_objects(events, "the array")
+        elif event == "start_map":
+            yield from _wrapped_objects(events)
+        else:
+            raise ValueError("the JSON document is not an array or an object")
+        # Reading to the end makes ijson reject trailing content.
+        collections.deque(events, maxlen=0)
+
+
+def _build(event: str, value: Any, events: Iterator[Tuple[str, str, Any]]) -> Any:
+    """Build one JSON value, starting from its first event."""
+    builder = ijson.ObjectBuilder()
+    builder.event(event, value)
+    depth = 1 if event in _CONTAINER_STARTS else 0
+    while depth:
+        _, event, value = next(events)
+        builder.event(event, value)
+        if event in _CONTAINER_STARTS:
+            depth += 1
+        elif event in _CONTAINER_ENDS:
+            depth -= 1
+    return builder.value
+
+
+def _skip(event: str, events: Iterator[Tuple[str, str, Any]]) -> None:
+    """Consume one JSON value without building it."""
+    depth = 1 if event in _CONTAINER_STARTS else 0
+    while depth:
+        _, event, _ = next(events)
+        if event in _CONTAINER_STARTS:
+            depth += 1
+        elif event in _CONTAINER_ENDS:
+            depth -= 1
+
+
+def _array_objects(
+    events: Iterator[Tuple[str, str, Any]], label: str, index: int = 0
+) -> Iterator[Dict[str, Any]]:
+    """Yield the objects of an array whose start event was already read."""
+    for _, event, value in events:
+        if event == "end_array":
+            return
+        index += 1
+        if event != "start_map":
+            raise ValueError(f"item {index} of {label} is not a JSON object")
+        yield _build(event, value, events)
+
+
+def _wrapped_objects(events: Iterator[Tuple[str, str, Any]]) -> Iterator[Dict[str, Any]]:
+    """Yield the objects of the one field that holds an array of objects."""
+    filled: List[str] = []
+    arrays = 0
+    for _, event, name in events:
+        if event == "end_map":
+            break
+        _, event, value = next(events)
+        if event != "start_array":
+            _skip(event, events)
+            continue
+        _, event, value = next(events)
+        if event == "end_array":
+            arrays += 1
+            continue
+        if event != "start_map":
+            _skip(event, events)
+            for _, event, _ in events:
+                if event == "end_array":
+                    break
+                _skip(event, events)
+            continue
+        arrays += 1
+        filled.append(name)
+        if len(filled) > 1:
+            raise ValueError(f"the JSON object has more than one array of objects: {filled}")
+        yield _build(event, value, events)
+        yield from _array_objects(events, f"field {name!r}", index=1)
+    if not filled and arrays != 1:
+        raise ValueError("the JSON object has no single field that holds an array of objects")
 
 
 def _read_jsonl(source: ObjectSource) -> Iterator[Dict[str, Any]]:
     with source.open() as raw:
-        text = io.TextIOWrapper(raw, encoding="utf-8-sig")
+        skip_bom(raw)
+        text = io.TextIOWrapper(raw, encoding="utf-8")
         for line_number, line in enumerate(text, 1):
             if not line.strip():
                 continue
