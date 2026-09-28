@@ -39,7 +39,7 @@ def test_secret_is_marked_secret():
 
 def test_optional_key_types():
     properties = TapS3.config_jsonschema["properties"]
-    assert properties["incremental_mode"]["type"] == ["boolean", "string", "null"]
+    assert properties["incremental_mode"]["type"] == ["boolean", "string", "integer", "null"]
     assert properties["lookback_minutes"]["default"] == 60
     assert properties["exclude_pattern"]["type"] == ["string", "null"]
     assert properties["incremental_mode"]["default"] is True

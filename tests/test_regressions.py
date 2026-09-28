@@ -195,7 +195,8 @@ def test_parquet_nan_becomes_null(bucket):
 
 def test_incremental_mode_accepts_strings_in_the_schema():
     prop = TapS3.config_jsonschema["properties"]["incremental_mode"]
-    assert set(prop["type"]) == {"boolean", "string", "null"}
+    assert set(prop["type"]) == {"boolean", "string", "integer", "null"}
+    assert (prop["minimum"], prop["maximum"]) == (0, 1)
 
 
 @pytest.mark.parametrize(
@@ -646,3 +647,127 @@ def test_unknown_incremental_mode_fails_discovery_without_validation(bucket):
     )
     with pytest.raises(ConfigValidationError, match="Use true, false, yes, no, 1 or 0"):
         tap.discover_streams()
+
+
+# Final finding 1: an object overwritten during a read.
+
+
+def overwrite_on_get(tap, bucket, key, body, on_call):
+    """Overwrite `key` just before the tap's GetObject call number `on_call`."""
+    calls = []
+
+    def before_get(params, **kwargs):
+        calls.append(params)
+        if len(calls) == on_call:
+            bucket.put(key, body)
+
+    tap.bucket.client.meta.events.register("before-call.s3.GetObject", before_get)
+    return calls
+
+
+def test_wrapper_changed_between_passes_fails_the_stream(bucket):
+    bucket.put("w.json", json.dumps({"data": [{"id": 1}, {"id": 2}]}), minutes(1))
+    catalog = select_all(discover())
+    tap = make_tap(catalog=catalog)
+    overwrite_on_get(tap, bucket, "w.json", json.dumps({"other": [{"id": 3}]}), 2)
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output), pytest.raises(Exception) as caught:
+        tap.sync_all()
+    message = str(caught.value)
+    assert "s3://tap-s3-test/w.json" in message
+    assert "changed during the sync" in message
+    assert "read next run" in message
+
+
+def test_parquet_changed_between_range_reads_fails_the_stream(bucket, monkeypatch):
+    monkeypatch.setattr(client_module, "RANGE_BUFFER_BYTES", 4096)
+    table = pa.table({"id": list(range(20_000))})
+    bucket.put("p.parquet", parquet_bytes(table, row_group_size=2_000), minutes(1))
+    catalog = select_all(discover())
+    tap = make_tap(catalog=catalog)
+    other = parquet_bytes(pa.table({"id": list(range(5))}))
+    calls = overwrite_on_get(tap, bucket, "p.parquet", other, 3)
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output), pytest.raises(Exception) as caught:
+        tap.sync_all()
+    assert "changed during the sync" in str(caught.value)
+    assert all(params["headers"].get("If-Match") for params in calls)
+
+
+def test_changed_object_is_skipped_by_discovery(bucket, tap_logs):
+    bucket.put("w.json", json.dumps({"data": [{"id": 1}]}))
+    bucket.put("people.csv", "id\n1\n")
+    tap = TapS3(config=CONFIG, parse_env_config=False, setup_mapper=False)
+    _ = tap.layout
+    bucket.put("w.json", json.dumps({"data": [{"id": 2}], "x": 1}))
+    streams = {stream.name for stream in tap.discover_streams()}
+    assert streams == {"people", "w"}
+    assert any("w.json" in m and "changed during the sync" in m for m in tap_logs)
+
+
+class _ShiftingSource(ObjectSource):
+    """Returns a different document on each open."""
+
+    def __init__(self, documents):
+        self.documents = list(documents)
+
+    @contextlib.contextmanager
+    def open(self):
+        yield io.BufferedReader(io.BytesIO(self.documents.pop(0).encode("utf-8")))
+
+
+def test_wrapper_second_pass_without_the_field_raises():
+    source = _ShiftingSource(
+        [json.dumps({"data": [{"id": 1}]}), json.dumps({"other": [{"id": 1}]})]
+    )
+    with pytest.raises(ValueError, match="'data'"):
+        list(iter_rows(source, FileFormat(".json", False)))
+
+
+# Final finding 2: STATE output still grows with the square of the window.
+
+
+def test_state_bytes_grow_linearly(aws, clock):
+    import boto3
+    from tests.conftest import Bucket
+
+    client = boto3.client("s3", region_name="us-east-1")
+    sizes = {}
+    for count in (1500, 5000):
+        name = f"linear-{count}"
+        client.create_bucket(Bucket=name)
+        bucket = Bucket(client, name)
+        for index in range(count):
+            bucket.put(f"events/part-{index:05d}.csv", f"id\n{index}\n", minutes(1000))
+        clock(1010)
+        messages = sync(bucket=name)
+        states = [m for m in messages if m["type"] == "STATE"]
+        assert len(records(messages, "events")) == count
+        sizes[count] = sum(len(json.dumps(m)) for m in states)
+    ratio = sizes[5000] / sizes[1500]
+    assert ratio < 5, sizes
+
+
+# Final finding 3: the schema rejects 1 and 0 as JSON numbers.
+
+
+@pytest.mark.parametrize("value, incremental", [(1, True), (0, False)])
+def test_incremental_mode_accepts_integer_one_and_zero(bucket, value, incremental):
+    bucket.put("orders/a.csv", "id\n1\n", minutes(1))
+    bucket.put("orders/b.csv", "id\n2\n", minutes(2))
+    state = {"bookmarks": {"orders": {"replication_key_value": iso(1), "window": {}}}}
+    messages = sync(state=state, incremental_mode=value)
+    expected = ["orders/b.csv"] if incremental else ["orders/a.csv", "orders/b.csv"]
+    assert keys(messages) == expected
+
+
+def test_incremental_mode_rejects_other_integers(bucket):
+    with pytest.raises(Exception, match="incremental_mode|2"):
+        make_tap(incremental_mode=2)
+
+
+def test_other_get_errors_pass_through(bucket):
+    from botocore.exceptions import ClientError
+
+    with pytest.raises(ClientError, match="NoSuchKey"):
+        client_module.get_pinned(bucket.client, bucket.name, "missing.csv", '"abc"')

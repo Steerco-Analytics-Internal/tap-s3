@@ -289,6 +289,11 @@ def _read_json(source: ObjectSource) -> Iterator[Dict[str, Any]]:
                 field = None
             else:
                 _skip(event, events)
+    if field is not None:
+        raise ValueError(
+            f"the second read did not find the field {field!r} that the first "
+            "read chose, so the object changed between the reads"
+        )
 
 
 def _record_field(events: Iterator[Tuple[str, str, Any]]) -> Optional[str]:

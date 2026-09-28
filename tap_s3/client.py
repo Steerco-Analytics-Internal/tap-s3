@@ -24,6 +24,31 @@ class RegionLookupError(Exception):
     """The bucket's region could not be found."""
 
 
+class ObjectChangedError(Exception):
+    """An object changed after it was listed, so its reads no longer agree."""
+
+
+def get_pinned(client: Any, bucket: str, key: str, etag: str, **options: Any) -> dict:
+    """GetObject, pinned to the ETag from the listing with IfMatch.
+
+    Every open and ranged read of an object goes through here, so all of them
+    see the same version. A changed object fails with ObjectChangedError.
+    """
+    if etag:
+        options["IfMatch"] = etag
+    try:
+        return client.get_object(Bucket=bucket, Key=key, **options)
+    except ClientError as err:
+        status = err.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        code = err.response.get("Error", {}).get("Code")
+        if status == 412 or code == "PreconditionFailed":
+            raise ObjectChangedError(
+                f"s3://{bucket}/{key} changed during the sync. The tap stopped "
+                "reading it, and it will be read next run."
+            ) from err
+        raise
+
+
 def normalize_location(location: Optional[str]) -> str:
     """Turn a GetBucketLocation answer into a region name.
 
@@ -86,9 +111,11 @@ class S3Bucket:
         for page in pages:
             yield from page.get("Contents", [])
 
-    def source(self, key: str, size: int, compressed: bool) -> "S3ObjectSource":
-        """A reader source for one object."""
-        return S3ObjectSource(self.client, self.bucket, key, size, compressed)
+    def source(
+        self, key: str, size: int, compressed: bool, etag: str = ""
+    ) -> "S3ObjectSource":
+        """A reader source for one object, pinned to its listed ETag."""
+        return S3ObjectSource(self.client, self.bucket, key, size, compressed, etag)
 
 
 class _StreamingBodyReader(io.RawIOBase):
@@ -109,11 +136,9 @@ class _StreamingBodyReader(io.RawIOBase):
 class _RangeReader(io.RawIOBase):
     """A seekable file over an object, read with ranged GET requests."""
 
-    def __init__(self, client: Any, bucket: str, key: str, size: int) -> None:
-        self._client = client
-        self._bucket = bucket
-        self._key = key
-        self._size = size
+    def __init__(self, source: "S3ObjectSource") -> None:
+        self._source = source
+        self._size = source.size
         self._position = 0
 
     def readable(self) -> bool:
@@ -138,8 +163,13 @@ class _RangeReader(io.RawIOBase):
         if self._position >= self._size or len(buffer) == 0:
             return 0
         end = min(self._position + len(buffer), self._size) - 1
-        response = self._client.get_object(
-            Bucket=self._bucket, Key=self._key, Range=f"bytes={self._position}-{end}"
+        source = self._source
+        response = get_pinned(
+            source.client,
+            source.bucket,
+            source.key,
+            source.etag,
+            Range=f"bytes={self._position}-{end}",
         )
         data = response["Body"].read()
         buffer[: len(data)] = data
@@ -150,18 +180,27 @@ class _RangeReader(io.RawIOBase):
 class S3ObjectSource(ObjectSource):
     """Opens one S3 object for the format readers."""
 
-    def __init__(self, client: Any, bucket: str, key: str, size: int, compressed: bool):
+    def __init__(
+        self,
+        client: Any,
+        bucket: str,
+        key: str,
+        size: int,
+        compressed: bool,
+        etag: str = "",
+    ):
         self.client = client
         self.bucket = bucket
         self.key = key
         self.size = size
         self.compressed = compressed
+        self.etag = etag
         self.description = f"s3://{bucket}/{key}"
 
     @contextlib.contextmanager
     def open(self) -> Iterator[BinaryIO]:
         """Stream the object's bytes, decompressed when it ends in `.gz`."""
-        body = self.client.get_object(Bucket=self.bucket, Key=self.key)["Body"]
+        body = get_pinned(self.client, self.bucket, self.key, self.etag)["Body"]
         try:
             raw = io.BufferedReader(
                 _StreamingBodyReader(body), buffer_size=STREAM_BUFFER_BYTES
@@ -182,7 +221,7 @@ class S3ObjectSource(ObjectSource):
         """
         if not self.compressed:
             yield io.BufferedReader(  # type: ignore[misc]
-                _RangeReader(self.client, self.bucket, self.key, self.size),
+                _RangeReader(self),
                 buffer_size=RANGE_BUFFER_BYTES,
             )
             return

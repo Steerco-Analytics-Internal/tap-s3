@@ -24,6 +24,7 @@ from typing import (
 from botocore.exceptions import BotoCoreError, ClientError
 from singer_sdk import Stream
 
+from tap_s3.client import ObjectChangedError
 from tap_s3.formats import DELIMITED, PARQUET, iter_rows, parquet_schema
 from tap_s3.layout import S3Object
 from tap_s3.schema import ColumnTypes, RecordConverter, ValueConversionError
@@ -62,7 +63,7 @@ def parse_errors(uri: str) -> Iterator[None]:
     """
     try:
         yield
-    except (ObjectParseError, BotoCoreError, ClientError):
+    except (ObjectParseError, ObjectChangedError, BotoCoreError, ClientError):
         raise
     except Exception as err:
         raise ObjectParseError(
@@ -135,7 +136,7 @@ def infer_schema(tap: "TapS3", name: str, objects: List[S3Object]) -> dict:
         attempt = ColumnTypes(rename)
         try:
             _sample_object(tap, obj, attempt)
-        except ObjectParseError as err:
+        except (ObjectParseError, ObjectChangedError) as err:
             LOGGER.warning("Discovery skipped %s: %s", tap.uri(obj.key), err)
             continue
         columns.merge(attempt)
@@ -148,7 +149,9 @@ def infer_schema(tap: "TapS3", name: str, objects: List[S3Object]) -> dict:
 
 
 def _sample_object(tap: "TapS3", obj: S3Object, columns: ColumnTypes) -> None:
-    source = tap.bucket.source(obj.key, obj.size, obj.file_format.compressed)
+    source = tap.bucket.source(
+        obj.key, obj.size, obj.file_format.compressed, obj.etag
+    )
     with parse_errors(tap.uri(obj.key)):
         if obj.file_format.kind == PARQUET:
             columns.observe_arrow_schema(parquet_schema(source))
@@ -220,8 +223,11 @@ class S3Stream(Stream):
                     obj, None if shares_time else min(obj.last_modified, window_start)
                 )
                 since_checkpoint += 1
+                # The interval grows with the window, so the bytes written stay
+                # linear in the number of objects.
+                interval = max(CHECKPOINT_OBJECTS, len(progress.window) // 10)
                 if (
-                    since_checkpoint >= CHECKPOINT_OBJECTS
+                    since_checkpoint >= interval
                     or monotonic() - last_checkpoint >= CHECKPOINT_SECONDS
                 ):
                     self._checkpoint(progress)
@@ -262,7 +268,9 @@ class S3Stream(Stream):
         tap = self.s3_tap
         uri = tap.uri(obj.key)
         self.logger.info("Reading %s", uri)
-        source = tap.bucket.source(obj.key, obj.size, obj.file_format.compressed)
+        source = tap.bucket.source(
+            obj.key, obj.size, obj.file_format.compressed, obj.etag
+        )
         last_modified = obj.last_modified.isoformat()
         with parse_errors(uri):
             rows = iter_rows(source, obj.file_format)

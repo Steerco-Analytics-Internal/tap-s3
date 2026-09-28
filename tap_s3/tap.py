@@ -91,7 +91,12 @@ class TapS3(Tap):
         th.Property(
             "incremental_mode",
             th.CustomType(
-                {"type": ["boolean", "string", "null"], "pattern": FLAG_PATTERN}
+                {
+                    "type": ["boolean", "string", "integer", "null"],
+                    "pattern": FLAG_PATTERN,
+                    "minimum": 0,
+                    "maximum": 1,
+                }
             ),
             default=True,
             description=(
