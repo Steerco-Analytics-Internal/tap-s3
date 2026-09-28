@@ -98,17 +98,17 @@ def parse_timestamp(text: str) -> datetime.datetime:
 
 
 def name_delimited_columns(row: Dict[str, Any]) -> Dict[str, Any]:
-    """Name the columns of a delimited row.
+    """Name the columns of a delimited row, the same way as top-level JSON keys.
 
-    A header keeps its name. A header named like a metadata column is
-    encoded, as in `_x5f_s3_key`, because the metadata column wins.
+    A header keeps its name, unless it is named like a metadata column or
+    reads as an encoded name, such as `a__b`. Then it is encoded, as in
+    `_x5f_s3_key` or `a_x5f__b`, so a header gives the same column as the
+    same JSON key.
     """
-    if not any(name in ROOT_RESERVED for name in row):
+    names = {name: top_level_name(name, ROOT_RESERVED) for name in row}
+    if all(name == renamed for name, renamed in names.items()):
         return row
-    return {
-        top_level_name(name, ROOT_RESERVED) if name in ROOT_RESERVED else name: value
-        for name, value in row.items()
-    }
+    return {names[name]: value for name, value in row.items()}
 
 
 def warn_renamed(logger: logging.Logger, stream: str, notes: Iterable[str]) -> None:
@@ -273,17 +273,11 @@ class S3Stream(Stream):
         group: List[S3Stream] = [self, *self.child_streams]  # type: ignore[list-item]
         active = [stream for stream in group if stream.selected]
         progress = {
-            stream.name: _Progress(
-                copy.deepcopy(stream.get_context_state(None))
-                if stream.is_limited
-                else stream.get_context_state(None),
-                listed,
-                window_start,
-            )
+            stream.name: _Progress(self._progress_state(stream), listed, window_start)
             for stream in active
         }
         tracked = [
-            progress[stream.name] for stream in active if not stream.is_limited
+            progress[stream.name] for stream in active if self._keeps_progress(stream)
         ]
         children = {
             stream.lineage: stream for stream in active if isinstance(stream, S3ChildStream)
@@ -319,7 +313,7 @@ class S3Stream(Stream):
                 )
                 bookmark = None if shares_time else min(obj.last_modified, window_start)
                 for name in targets:
-                    if not streams[name].is_limited:
+                    if self._keeps_progress(streams[name]):
                         progress[name].finish(obj, bookmark)
                 since_checkpoint += 1
                 # The interval grows with the window, so the bytes written stay
@@ -343,6 +337,25 @@ class S3Stream(Stream):
             self._checkpoint(tracked)
             raise
         self._checkpoint(tracked)
+
+    @staticmethod
+    def _progress_state(stream: "S3Stream") -> dict:
+        """The state dict a stream's progress works on.
+
+        A stream with a record limit works on a copy, so nothing it tracks can
+        reach the STATE messages. `_keeps_progress` guards the same case.
+        """
+        state = stream.get_context_state(None)
+        return copy.deepcopy(state) if stream.is_limited else state
+
+    @staticmethod
+    def _keeps_progress(stream: "S3Stream") -> bool:
+        """Whether a stream's bookmark and window move during this sync.
+
+        A record limit can drop some of a stream's rows, so a limited stream
+        never marks an object done.
+        """
+        return not stream.is_limited
 
     def _objects_to_read(self, listed: List[S3Object]) -> List[S3Object]:
         objects = sorted(listed, key=lambda obj: obj.sort_key)
@@ -385,7 +398,7 @@ class S3Stream(Stream):
                         notes = [
                             f"{name} to {top_level_name(name, ROOT_RESERVED)}"
                             for name in raw
-                            if name in ROOT_RESERVED
+                            if top_level_name(name, ROOT_RESERVED) != name
                         ]
                         pieces: Iterable[Any] = []
                     else:

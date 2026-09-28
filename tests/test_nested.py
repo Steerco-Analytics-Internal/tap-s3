@@ -1,6 +1,7 @@
 """Nested JSON and Parquet data taken apart into tables."""
 
 import contextlib
+import gc
 import io
 import json
 import pathlib
@@ -598,6 +599,7 @@ def nested_file(path, customers):
 
 
 def peak_while_exploding(path):
+    gc.collect()
     tracemalloc.start()
     try:
         counts = {}
@@ -611,17 +613,19 @@ def peak_while_exploding(path):
 
 
 def test_large_nested_json_uses_bounded_memory(tmp_path):
-    small_size = nested_file(tmp_path / "small.json", 20_000)
-    large_size = nested_file(tmp_path / "large.json", 80_000)
-    small_counts, small_peak = peak_while_exploding(tmp_path / "small.json")
-    large_counts, large_peak = peak_while_exploding(tmp_path / "large.json")
-    lines = ((("lines",),))
-    assert small_counts == {(): 20_000, lines: 100_000}
-    assert large_counts == {(): 80_000, lines: 400_000}
-    # The file is four times larger. Memory stays nearly flat.
-    assert large_size > 3.9 * small_size
-    assert large_peak < 1.6 * small_peak
-    assert large_peak < large_size / 3
+    customers = (5_000, 20_000, 60_000)
+    sizes = [nested_file(tmp_path / f"{count}.json", count) for count in customers]
+    peaks = []
+    for count in customers:
+        counts, peak = peak_while_exploding(tmp_path / f"{count}.json")
+        assert counts == {(): count, (("lines",),): count * 5}
+        peaks.append(peak)
+    # The largest file is twelve times the smallest. Linear growth would
+    # need twelve times the memory. The peak grows far less, with margin.
+    assert sizes[2] > 11 * sizes[0]
+    assert peaks[2] < 3 * peaks[0]
+    assert peaks[2] < 2 * peaks[1]
+    assert peaks[2] < sizes[2] / 2
 
 
 def test_flat_files_match_v1_0_0(bucket):

@@ -4,7 +4,18 @@ import datetime
 import json
 import re
 from functools import cached_property
-from typing import Any, Dict, List, NamedTuple, Optional, Pattern, Tuple
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    NamedTuple,
+    Optional,
+    Pattern,
+    Set,
+    Tuple,
+)
 
 from singer_sdk import Stream, Tap
 from singer_sdk import typing as th
@@ -252,7 +263,7 @@ class TapS3(Tap):
         _ = self.exclude_pattern
         if self.input_catalog:
             return self._streams_from_catalog()
-        plan = self._stream_plan
+        plan = self._plan(self.layout.streams)
         roots = {
             name: S3Stream(tap=self, name=name, schema=schema)
             for name, schema in plan.roots.items()
@@ -270,21 +281,22 @@ class TapS3(Tap):
             streams.append(child)
         return streams
 
-    @cached_property
-    def _stream_plan(self) -> "_StreamPlan":
-        """Name every file stream and child stream the bucket holds.
+    def _plan(self, roots: Iterable[str]) -> "_StreamPlan":
+        """Name the child streams of the given file streams.
 
-        Discovery builds its streams from this plan. A sync builds it only to
-        link a catalog child that has lost its parent metadata. The naming is
+        Discovery plans every file stream. A sync plans only the file streams
+        it needs to link catalog children that lost their parent metadata.
+        Every file stream name in the bucket counts as taken, so the naming
+        matches discovery for the planned file streams. The naming is
         deterministic, so the same bucket gives the same names and lineages.
         """
         plan = _StreamPlan()
         pending: List[Tuple[str, Lineage, dict]] = []
-        for name, objects in sorted(self.layout.streams.items()):
-            schemas = infer_schemas(self, name, objects)
+        for name in sorted(set(roots)):
+            schemas = infer_schemas(self, name, self.layout.streams[name])
             plan.roots[name] = schemas.pop(())
             pending.extend((name, lineage, schema) for lineage, schema in schemas.items())
-        taken = set(plan.roots)
+        taken = set(self.layout.streams)
         names: Dict[Tuple[str, Lineage], str] = {(name, ()): name for name in plan.roots}
         # Parents come before their children, so a child's name can build on
         # its parent's final name.
@@ -309,7 +321,9 @@ class TapS3(Tap):
                 )
             taken.add(name)
             names[(root, lineage)] = name
-            plan.children.append(_PlannedChild(name, root, parent, lineage, schema))
+            plan.children.append(
+                _PlannedChild(name, natural, root, parent, lineage, schema)
+            )
         return plan
 
     def _streams_from_catalog(self) -> List[Stream]:
@@ -319,10 +333,8 @@ class TapS3(Tap):
         path in custom metadata at breadcrumb `[]`: PARENT_STREAM_METADATA and
         LIST_PATH_METADATA. The tap links a child by that metadata.
 
-        - When a catalog store drops the metadata, the tap names the streams
-          in the bucket the way discovery does, and links a child whose name
-          matches a child stream there exactly. Names are unique, so a match
-          is never ambiguous. It never guesses from a name prefix.
+        - When a catalog store drops the metadata, the tap falls back to
+          names. See `_link_by_name`. It never guesses from a name prefix.
         - A child that can't be linked, or whose parent is missing, is skipped
           with a warning, and its state is left alone.
         - The tap logs once per child how it linked it.
@@ -333,6 +345,7 @@ class TapS3(Tap):
         roots: Dict[str, S3Stream] = {}
         specs: Dict[str, Tuple[str, Path, dict]] = {}
         how: Dict[str, str] = {}
+        stripped: List[Tuple[str, dict, bool]] = []
         for entry in self.input_catalog.streams:  # type: ignore[union-attr]
             name = entry.stream or entry.tap_stream_id
             schema = entry.schema.to_dict()
@@ -358,23 +371,17 @@ class TapS3(Tap):
                 continue
             properties = schema.get("properties", {})
             if ROW_KEY_COLUMN in properties and PARENT_ROW_COLUMN in properties:
-                planned = self._stream_plan.child(name)
-                if planned is None:
-                    self.logger.warning(
-                        "Stream '%s' is skipped: its catalog entry has no %s "
-                        "metadata, and the bucket has no child stream with that "
-                        "name. Run discovery again.",
-                        name,
-                        PARENT_STREAM_METADATA,
-                    )
-                    continue
-                specs[name] = (planned.parent, planned.lineage[-1], schema)
-                how[name] = (
-                    f"by its name, because its catalog entry has no "
-                    f"{PARENT_STREAM_METADATA} metadata"
-                )
+                selected = entry.metadata.resolve_selection().get((), True)
+                stripped.append((name, schema, selected))
                 continue
             roots[name] = S3Stream(tap=self, name=name, schema=schema)
+        child_names = set(specs) | {name for name, _, _ in stripped}
+        for name, schema, parent_name, path in self._link_by_name(stripped, child_names):
+            specs[name] = (parent_name, path, schema)
+            how[name] = (
+                f"by its name, because its catalog entry has no "
+                f"{PARENT_STREAM_METADATA} metadata"
+            )
         streams: List[Stream] = list(roots.values())
         built: Dict[str, S3Stream] = dict(roots)
 
@@ -421,6 +428,59 @@ class TapS3(Tap):
                 )
         return streams
 
+    def _link_by_name(
+        self, stripped: List[Tuple[str, dict, bool]], child_names: Set[str]
+    ) -> Iterator[Tuple[str, dict, str, Path]]:
+        """Link catalog children that lost their metadata, by exact name.
+
+        The tap plans only the file streams whose names start the names of
+        selected children, and links a child only when all of these hold:
+
+        - Exactly one planned child has the catalog name as its natural name,
+          and the plan gave that child its natural name, with no clash suffix.
+        - No child name under that file stream, in the plan or in the
+          catalog, carries a clash suffix. A suffix means names moved between
+          lists, so a name alone can't be trusted.
+        - Every column in the catalog entry is a column of the planned child.
+
+        Every other child is skipped with a warning, and its state is left
+        alone. Yields the name, schema, parent name and list path of each
+        linked child.
+        """
+        if not stripped:
+            return
+        self.logger.warning(
+            "%d child streams have no %s metadata in the catalog. The tap links "
+            "them by name. Run discovery again and save the catalog to restore "
+            "the metadata.",
+            len(stripped),
+            PARENT_STREAM_METADATA,
+        )
+
+        def candidate_roots(name: str) -> Set[str]:
+            return {root for root in self.layout.streams if name.startswith(root + "__")}
+
+        wanted: Set[str] = set()
+        for name, _, selected in stripped:
+            if selected:
+                wanted |= candidate_roots(name)
+        plan = self._plan(wanted)
+        for name, schema, _ in stripped:
+            if not candidate_roots(name) & wanted:
+                self.logger.info("Stream '%s' isn't selected, so it isn't linked.", name)
+                continue
+            reason = _name_link_problem(name, schema, plan, child_names)
+            if isinstance(reason, str):
+                self.logger.warning(
+                    "Stream '%s' is skipped: its catalog entry has no %s metadata, "
+                    "and %s. Run discovery again.",
+                    name,
+                    PARENT_STREAM_METADATA,
+                    reason,
+                )
+                continue
+            yield name, schema, reason.parent, reason.lineage[-1]
+
     @property
     def catalog_dict(self) -> dict:
         """The catalog, with each child stream's parent and list path.
@@ -451,6 +511,7 @@ class _PlannedChild(NamedTuple):
     """A child stream the bucket holds: its name, file stream and parent."""
 
     name: str
+    natural: str
     root: str
     parent: str
     lineage: Lineage
@@ -464,10 +525,42 @@ class _StreamPlan:
         self.roots: Dict[str, dict] = {}
         self.children: List[_PlannedChild] = []
 
-    def child(self, name: str) -> Optional[_PlannedChild]:
-        """The planned child stream with exactly this name, or None."""
-        matches = [planned for planned in self.children if planned.name == name]
-        return matches[0] if len(matches) == 1 else None
+
+_CLASH_SUFFIX = re.compile(r"(.+)_(\d+)")
+
+
+def _name_link_problem(
+    name: str, schema: dict, plan: "_StreamPlan", child_names: Set[str]
+) -> Any:
+    """The planned child to link a catalog child to, or why it can't be linked."""
+    known = {child.natural for child in plan.children} | child_names
+
+    def has_suffix(candidate: str) -> bool:
+        match = _CLASH_SUFFIX.fullmatch(candidate)
+        return bool(match) and match.group(1) in known
+
+    if has_suffix(name):
+        return "its name carries a clash suffix"
+    matches = [planned for planned in plan.children if planned.natural == name]
+    if not matches:
+        return "the bucket has no child stream with that name"
+    if len(matches) > 1:
+        return "several child streams in the bucket have that name"
+    planned = matches[0]
+    siblings = [child for child in plan.children if child.root == planned.root]
+    if any(child.name != child.natural for child in siblings):
+        return f"a child stream of '{planned.root}' in the bucket has a clash suffix"
+    under_root = [child for child in child_names if child.startswith(planned.root + "__")]
+    if any(has_suffix(child) for child in under_root):
+        return f"a child stream of '{planned.root}' in the catalog has a clash suffix"
+    columns = set(planned.schema.get("properties", {}))
+    extra = set(schema.get("properties", {})) - columns
+    if extra:
+        return (
+            "the bucket's child stream with that name lacks its columns "
+            + ", ".join(sorted(extra))
+        )
+    return planned
 
 
 def _read_raw_catalog(catalog: Any) -> Optional[dict]:

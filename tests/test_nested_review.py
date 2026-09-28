@@ -265,3 +265,68 @@ def test_a_catalog_object_links_children_by_name(bucket, tap_logs):
     tap = make_tap(catalog=catalog)
     assert sorted(tap.streams) == ["o", "o__items"]
     assert any("o__items" in m and "by its name" in m for m in tap_logs)
+
+
+# Final review N3: a CSV header and a JSON key give the same column.
+
+
+def test_csv_headers_and_json_keys_share_one_encoding(bucket, tap_logs):
+    bucket.put("h/a.csv", "id,a__b,_s3_key,x-y\n1,2,3,4\n", minutes(1))
+    bucket.put(
+        "h/b.jsonl",
+        json.dumps({"id": 5, "a__b": 6, "_s3_key": 7, "x-y": 8}) + "\n",
+        minutes(2),
+    )
+    catalog = select_all(discover())
+    assert [c for c in schemas(catalog)["h"]] == [
+        "id",
+        "a_x5f__b",
+        "_x5f_s3_key",
+        "x-y",
+        "_s3_key",
+        "_s3_last_modified",
+        "_row_number",
+    ]
+    rows = [dict(data(r), key=r["_s3_key"]) for r in records(sync(catalog), "h")]
+    assert rows == [
+        {"id": "1", "a_x5f__b": "2", "x-y": "4", "key": "h/a.csv"},
+        {"id": "5", "a_x5f__b": "6", "x-y": "8", "key": "h/b.jsonl"},
+    ]
+    assert any("a__b to a_x5f__b" in m for m in tap_logs)
+
+
+# Each guard for limited streams holds on its own.
+
+
+EARLY = "2026-09-01T11:00:00+00:00"
+
+
+def limited_child_run(bucket):
+    # Three objects with one row each stay under the limit, so each object
+    # finishes, and only the guards keep the bookmark still.
+    for index in range(3):
+        bucket.put(f"o/{index}.jsonl", json.dumps({"id": index, "a": [{"v": index}]}) + "\n",
+                   minutes(index + 1))
+    catalog = select(discover(), {"o__a"})
+    state = {"bookmarks": {"o__a": {"replication_key_value": EARLY, "window": {}}}}
+    messages = run(catalog, limits={"o__a": 5}, state=state)
+    assert len(records(messages, "o__a")) == 3
+    return last_state(messages)["bookmarks"]["o__a"]
+
+
+def test_the_state_copy_alone_protects_a_limited_stream(bucket, monkeypatch):
+    from tap_s3.streams import S3Stream
+
+    monkeypatch.setattr(S3Stream, "_keeps_progress", staticmethod(lambda stream: True))
+    assert limited_child_run(bucket) == {"replication_key_value": EARLY, "window": {}}
+
+
+def test_the_progress_guard_alone_protects_a_limited_stream(bucket, monkeypatch):
+    from tap_s3.streams import S3Stream
+
+    monkeypatch.setattr(
+        S3Stream,
+        "_progress_state",
+        staticmethod(lambda stream: stream.get_context_state(None)),
+    )
+    assert limited_child_run(bucket) == {"replication_key_value": EARLY, "window": {}}
