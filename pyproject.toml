@@ -1,15 +1,17 @@
 [tool.poetry]
-name = "tap-template"
-version = "0.0.1"
-description = "`tap-template` is a Singer tap template, built with the Meltano SDK for Singer Taps."
+name = "tap-s3"
+version = "0.1.0"
+description = "`tap-s3` is a Singer tap that reads tabular files from an AWS S3 bucket, built with the Meltano SDK for Singer Taps."
 authors = ["Steerco Analytics"]
 license = "Apache 2.0"
-keywords = ["ELT"]
+keywords = ["ELT", "S3"]
 
 [tool.poetry.dependencies]
-python = "<3.11,>=3.7.1"
-requests = "^2.25.1"
+python = "<3.11,>=3.8"
 singer-sdk = "^0.33.1"
+boto3 = "^1.28"
+pyarrow = ">=12"
+ijson = "^3.2"
 
 [tool.poetry.dev-dependencies]
 pytest = "^6.2.5"
@@ -17,16 +19,22 @@ black = "^21.9b0"
 flake8 = "^3.9.2"
 isort = "^5.10.1"
 mypy = "^0.910"
-types-requests = "^2.26.1"
+moto = {version = "^5.0", extras = ["s3"]}
+pytest-cov = "^4.1"
+
+[tool.pytest.ini_options]
+addopts = "--cov=tap_s3 --cov-report=term-missing --cov-fail-under=90"
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
 
 [tool.isort]
 profile = "black"
 multi_line_output = 3
-src_paths = "tap_template"
+src_paths = "tap_s3"
 
 [build-system]
 requires = ["poetry-core==1.0.8"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.poetry.scripts]
-tap-template = "tap_template.tap:TapTemplate.cli"
+tap-s3 = "tap_s3.tap:TapS3.cli"
