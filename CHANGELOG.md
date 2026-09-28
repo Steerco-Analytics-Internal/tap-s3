@@ -13,7 +13,9 @@
 - Column names are one-to-one with paths. Keys are encoded with `_xHH_`
   escapes where needed, so two paths never share a column.
 - Each child stream's catalog entry records its parent in the metadata keys
-  `tap-s3.parent-stream` and `tap-s3.list-path`.
+  `tap-s3.parent-stream` and `tap-s3.list-path`. When a catalog store drops
+  those keys, the tap links a child stream by an exact match of its name
+  against the streams it names in the bucket.
 
 ### Changed
 

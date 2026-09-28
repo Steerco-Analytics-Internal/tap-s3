@@ -241,9 +241,23 @@ Each child stream's catalog entry records its parent in metadata at breadcrumb
 | `tap-s3.parent-stream` | The name of the parent stream. |
 | `tap-s3.list-path` | The list's path inside a parent row, as a JSON array of keys. |
 
-A sync links each child stream to its parent by these keys only. A child
-stream without them, or whose parent is missing, is skipped with a warning,
-and its bookmark doesn't move. Keep the keys when you edit a catalog.
+A sync links each child stream to its parent by these keys. A catalog store
+might drop metadata keys it doesn't know. When a child stream's entry has no
+`tap-s3.parent-stream` key, the tap names the streams in the bucket the way
+discovery does, and links the child whose name matches exactly. The naming is
+deterministic, so the same bucket gives the same names. The tap never guesses
+a parent from part of a name. It logs, once per child stream, whether it
+linked the child by its metadata or by its name.
+
+A child stream that the tap can't link is skipped with a warning, and its
+bookmark doesn't move. That happens when the parent is missing, or when the
+bucket no longer has a child stream with that name. For example, say a file
+`orders__items.json` appears after discovery, next to the list `items` in
+`orders.json`. The file stream then takes the name `orders__items`, and the
+list's child stream becomes `orders__items_2`. A catalog entry
+`orders__items` without the metadata no longer names a child stream, so the
+tap skips it rather than guess. With the metadata, the child stream still
+syncs. To pick up such a change, run discovery again.
 
 ### Other lists become JSON text
 
