@@ -26,8 +26,9 @@ so the connection form stays the same.
 | `exclude_pattern` | No | A regular expression. The tap ignores objects whose key matches it. |
 
 `incremental_mode` accepts a boolean or a string, because Hotglue can send
-either. The strings `true`, `1` and `yes` mean true, in any case. Other
-strings mean false. A missing value or an empty string means `true`.
+either. The strings `true`, `yes` and `1` mean true, and `false`, `no` and
+`0` mean false. Case and surrounding spaces don't matter. A missing value or
+an empty string means `true`. Any other value is a config error.
 
 `exclude_pattern` is matched with a regex search against the key relative to
 `path_prefix`. Discovery and sync both apply it. Use it to leave out files
@@ -88,6 +89,11 @@ The tap picks the format from the extension. Each format also works with a
 |---|---|
 | `.csv`, `.tsv`, `.txt` | Delimited text. The tap detects `,`, tab, `;` or `\|` from the first 16 KiB. |
 | `.json` | An array of objects, or an object with one field that holds an array of objects. The tap streams it with ijson. |
+
+For a `.json` object, only a field whose every item is an object counts. The
+tap reads the whole structure once before it yields any row. So a file with
+two such fields fails at discovery, even when the rows come first. A second
+pass then streams the chosen field.
 | `.jsonl`, `.ndjson` | One JSON object per line. The tap skips blank lines. |
 | `.parquet` | Parquet. The tap reads it by row group with ranged GET requests. |
 
@@ -146,8 +152,9 @@ bucket again.
 - The tap reads a stream's objects oldest first, by LastModified, then by key.
 - The tap writes date-time values with a UTC offset. A value without a zone,
   including a Parquet timestamp, is taken as UTC.
-- A value that JSON can't hold, such as NaN or infinity, becomes null. An
-  empty string is null in every column that isn't a string.
+- A value that JSON can't hold, such as NaN or infinity, becomes null. So
+  does text that overflows to infinity, such as `1e400`. An empty string is
+  null in every column that isn't a string.
 - The tap drops a column that isn't in the catalog schema. It logs one warning
   per stream.
 - The tap stops early when the SDK's record limit is reached. Hotglue
@@ -164,11 +171,18 @@ time it started. So an object can appear after the tap has bookmarked a later
 time. To read such objects, the tap keeps a lookback window:
 
 - The bookmark never passes the listing time minus `lookback_minutes`.
-- Objects read inside the window are kept in state by key and ETag. The next
-  sync lists the window again and skips only those objects.
+- Objects read inside the window are kept in state as a map of key to ETag.
+  The next sync lists the window again and skips only those objects.
 - An object whose content changes gets a new ETag, so the tap reads it again.
-- The state keeps only entries newer than the bookmark, so it stays small.
+- The tap prunes entries at or before the bookmark, using the LastModified
+  values from the current listing, so the state stays small.
 - The tap skips objects at or before the bookmark.
+- State written before the window existed has no `window` key. The first
+  sync lowers its bookmark once to the window start.
+
+The tap writes STATE after every 100 objects or 30 seconds, whichever comes
+first. It also writes STATE at the end of each stream, and before it stops on
+an error.
 
 The bookmark moves after the last row of each object. When several objects
 share one LastModified value, it moves after the last of them. At the end of a
