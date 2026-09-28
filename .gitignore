@@ -1,0 +1,40 @@
+# Secrets and internal config files
+**/.secrets/*
+
+# Meltano internal cache
+.meltano/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Tap output
+output/
+*.singer
