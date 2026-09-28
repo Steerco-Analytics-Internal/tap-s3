@@ -10,14 +10,20 @@
   Other lists become JSON text columns. See "Nested data" in the README.
 - A sync reads each object once, and routes rows to every selected stream.
 
+- Column names are one-to-one with paths. Keys are encoded with `_xHH_`
+  escapes where needed, so two paths never share a column.
+- Each child stream's catalog entry records its parent in the metadata keys
+  `tap-s3.parent-stream` and `tap-s3.list-path`.
+
 ### Changed
 
 - A nested object is no longer one `object` column, and a list is no longer
-  one `array` column. A catalog saved on version 1.0.0 for nested data
-  still syncs: its `object` columns and its `array` columns for lists of
-  objects stay null, and its other `array` columns keep their values. Run
-  discovery again and save the catalog to get the new columns and child
-  streams.
+  one `array` column. A catalog saved on version 1.0.0 for nested data needs
+  discovery again. Run discovery and save the catalog.
+- A column named like a metadata column is encoded, as in `_x5f_s3_key`,
+  instead of renamed to `_s3_key_source`.
+- A stream with a record limit, such as in a field-sample job, writes no
+  bookmark changes.
 - A Parquet map column is JSON text instead of an `object` column.
 - Files with no nested objects or lists give the same catalog and records
   as version 1.0.0.

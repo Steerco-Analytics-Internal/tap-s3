@@ -153,8 +153,8 @@ Every data column is nullable. Every record also carries these columns:
 | `_row_number` | integer | The row's position in the object, starting at 1. |
 
 The primary key is `_s3_key` and `_row_number`. The replication key is
-`_s3_last_modified`. A source column with one of these names is renamed to
-`<name>_source`, such as `_s3_key_source`, and the tap logs a warning.
+`_s3_last_modified`. A source column with one of these names gets its first
+underscore encoded, as in `_x5f_s3_key`, and the tap logs a warning.
 
 ## Nested data
 
@@ -169,16 +169,31 @@ The tap joins the path to each nested value with `__`. For example,
 `valueRealization__grossSales`, and `licenseUtilization.storage.used`
 becomes `licenseUtilization__storage__used`.
 
-- The tap sanitizes each part of a joined name like a stream name. A key at
-  the top level of a row keeps its own name.
-- A joined name that is already taken gets a suffix, such as `a__b_2`, and
-  the tap logs a warning. Keys at the top level of a row keep their names,
-  and the tap resolves clashes within each row.
 - Nesting stops at 10 levels, counting objects and lists. A deeper object or
   list stays whole, as JSON text in one column.
 - A null or empty object adds no columns. Its fields are null in that row.
 
 Parquet struct columns follow the same rules.
+
+### Column names
+
+Each column name stands for exactly one path, and the path alone decides the
+name. So two paths never share a column, whatever keys a row has and in
+whatever order.
+
+- A key at the top level of a row keeps its own name, so flat files keep
+  their columns.
+- In a joined name, each key keeps its Unicode letters and digits. Any other
+  character becomes `_xHH_`, with its code point in hex. For example,
+  `x-y` becomes `x_x2d_y`, and a space becomes `_x20_`.
+- An underscore stays when it sits between two kept characters. Other
+  underscores become `_x5f_`, so a key never holds the `__` that joins a
+  path. For example, the key `a__b` inside an object becomes `a_x5f__b`.
+- A top-level key that reads as a joined name, such as `a__b`, is encoded
+  the same way, so it can't take the column of the path `a.b`.
+- A top-level key named like a metadata column, such as `_s3_key`, gets its
+  first underscore encoded, as in `_x5f_s3_key`. The metadata column keeps
+  its name. The tap logs one warning per stream for the keys it renames.
 
 ### Lists of objects become child streams
 
@@ -206,8 +221,29 @@ Each child row carries these columns:
 | `_s3_last_modified` | date-time | The object's LastModified value, in UTC. |
 
 The primary key of a child stream is `_s3_key` and `_row_key`. The
-replication key is `_s3_last_modified`. A column in an item that has one of
-these names gets a `_source` suffix.
+replication key is `_s3_last_modified`. An item's key named like one of these
+columns, or starting with `_parent__`, gets its first underscore encoded, as
+in `_x5f_index`.
+
+### Stream names
+
+A child stream's name joins its parent stream's name and the list's path with
+`__`, and encodes the keys like column names. When that name is already taken,
+for example by a file stream from `orders__items.json` next to the list
+`items` in `orders.json`, the child stream gets a suffix, such as
+`orders__items_2`, and the tap logs a warning. File streams keep their names.
+
+Each child stream's catalog entry records its parent in metadata at breadcrumb
+`[]`:
+
+| Key | Value |
+|---|---|
+| `tap-s3.parent-stream` | The name of the parent stream. |
+| `tap-s3.list-path` | The list's path inside a parent row, as a JSON array of keys. |
+
+A sync links each child stream to its parent by these keys only. A child
+stream without them, or whose parent is missing, is skipped with a warning,
+and its bookmark doesn't move. Keep the keys when you edit a catalog.
 
 ### Other lists become JSON text
 
@@ -229,23 +265,20 @@ become JSON text too.
   a stream only after the tap emits its rows for every selected stream. A
   child stream selected later reads the older objects for itself, and the
   other streams don't read them again.
-- A child stream in the catalog that the bucket no longer has is skipped with
-  a warning. A child stream that appears after discovery is ignored until you
-  run discovery again.
+- A child stream that appears after discovery is ignored until you run
+  discovery again.
+- A record limit, such as in a field-sample job, can drop some rows. So a
+  stream with a record limit writes no bookmark changes.
 
 ### Change from version 1.0.0
 
 Version 1.0.0 typed a nested object as an `object` column, and a list as an
 `array` column. Version 1.1.0 takes them apart as described above. A catalog
-saved on version 1.0.0 for nested data still syncs:
+saved on version 1.0.0 for nested data needs discovery again: run discovery
+and save the catalog.
 
-- An `object` column, and an `array` column for a list of objects, stay null.
-- An `array` column for any other list keeps its values.
-- The new columns and child streams are missing, and the tap logs one warning
-  per stream for the columns it drops.
-
-To get the new columns and child streams, run discovery again and save the
-catalog.
+Version 1.0.0 renamed a column named like a metadata column to
+`<name>_source`. Version 1.1.0 encodes it instead, as in `_x5f_s3_key`.
 
 ## Sync
 
