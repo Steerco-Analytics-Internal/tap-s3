@@ -1,8 +1,8 @@
 """Type inference for discovery, and value conversion for sync.
 
-Inference is conservative. A column gets integer, number, boolean or
-date-time only when every non-empty sampled value parses as that type.
-Otherwise it is a string.
+Columns from delimited files are always strings. For JSON and JSONL,
+inference is conservative: a column gets a type other than string only when
+every non-empty sampled value has that type. Parquet uses its own schema.
 """
 
 import base64
@@ -68,18 +68,15 @@ def parse_iso_datetime(text: str) -> Optional[datetime.datetime]:
         return None
 
 
-def text_type(text: str) -> str:
-    """Infer the narrowest type of one non-empty text value."""
+def is_number_text(text: str) -> bool:
+    """True when text is a plain decimal number, such as `-1.5` or `2e3`.
+
+    Leading zeros, `NaN` and `inf` don't count.
+    """
     stripped = text.strip()
-    if _INTEGER_TEXT.match(stripped):
-        return INTEGER
-    if stripped and _NUMBER_TEXT.match(stripped) and any(c.isdigit() for c in stripped):
-        return NUMBER
-    if stripped.lower() in ("true", "false"):
-        return BOOLEAN
-    if parse_iso_datetime(stripped) is not None:
-        return DATE_TIME
-    return STRING
+    return bool(
+        _NUMBER_TEXT.match(stripped) and any(char.isdigit() for char in stripped)
+    )
 
 
 def json_value_type(value: Any) -> str:
@@ -170,9 +167,14 @@ class ColumnTypes:
             self.observe(name, EMPTY)
 
     def observe_text_row(self, row: Dict[str, Any]) -> None:
-        """Record a row from a delimited file."""
+        """Record a row from a delimited file.
+
+        Delimited columns are always text, with no inference. Steerco's sync
+        schema converts text to numbers, dates and booleans downstream, so a
+        value outside the sample can't break the sync.
+        """
         for name, value in row.items():
-            self.observe(name, EMPTY if value is None else text_type(value))
+            self.observe(name, EMPTY if value is None else STRING)
 
     def observe_json_row(self, row: Dict[str, Any]) -> None:
         """Record a row from a JSON or JSONL file."""
@@ -282,7 +284,7 @@ def _to_number(value: Any) -> Any:
         raise _fail(value, NUMBER)
     if isinstance(value, (int, float, decimal.Decimal)):
         return value
-    if isinstance(value, str) and text_type(value) in (INTEGER, NUMBER):
+    if isinstance(value, str) and is_number_text(value):
         stripped = value.strip()
         return int(stripped) if _INTEGER_TEXT.match(stripped) else float(stripped)
     raise _fail(value, NUMBER)

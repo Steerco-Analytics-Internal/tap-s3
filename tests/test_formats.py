@@ -64,10 +64,14 @@ def test_every_format(bucket, file_name, compressed):
     bucket.put(key, gzipped(body) if compressed else body)
     catalog = discover()
     properties = schemas(catalog)["people"]
-    assert properties["id"]["type"] == ["integer", "null"]
+    delimited = file_name.endswith((".csv", ".tsv", ".txt"))
+    # Delimited columns are always text. The other formats keep their types.
+    id_type = "string" if delimited else "integer"
+    assert properties["id"]["type"] == [id_type, "null"]
     assert properties["name"]["type"] == ["string", "null"]
     stream_records = records(sync(select_all(catalog)), "people")
-    assert data_rows(stream_records) == ROWS
+    expected = [dict(row, id=str(row["id"])) for row in ROWS] if delimited else ROWS
+    assert data_rows(stream_records) == expected
     assert [r["_row_number"] for r in stream_records] == [1, 2]
     assert {r["_s3_key"] for r in stream_records} == {key}
 
@@ -117,13 +121,13 @@ def sync_one(bucket, key, body):
 def test_csv_with_a_bom(bucket):
     properties, rows = sync_one(bucket, "bom.csv", b"\xef\xbb\xbfid,name\n1,Ada\n")
     assert "id" in properties and "﻿id" not in properties
-    assert rows == [{"id": 1, "name": "Ada"}]
+    assert rows == [{"id": "1", "name": "Ada"}]
 
 
 def test_csv_in_cp1252(bucket):
     body = "id,name\n1,Café\n2,naïve € ok\n".encode("cp1252")
     _, rows = sync_one(bucket, "legacy.csv", body)
-    assert rows == [{"id": 1, "name": "Café"}, {"id": 2, "name": "naïve € ok"}]
+    assert rows == [{"id": "1", "name": "Café"}, {"id": "2", "name": "naïve € ok"}]
 
 
 def test_cp1252_after_many_utf8_rows(bucket):
@@ -133,14 +137,14 @@ def test_cp1252_after_many_utf8_rows(bucket):
     catalog = select_all(discover())
     rows = data_rows(records(sync(catalog), "late"))
     assert len(rows) == 5001
-    assert rows[0] == {"id": 1, "name": "row 1"}
-    assert rows[-1] == {"id": 5001, "name": "Café"}
-    assert [r["id"] for r in rows] == list(range(1, 5002))
+    assert rows[0] == {"id": "1", "name": "row 1"}
+    assert rows[-1] == {"id": "5001", "name": "Café"}
+    assert [r["id"] for r in rows] == [str(i) for i in range(1, 5002)]
 
 
 def test_csv_without_a_trailing_newline(bucket):
     _, rows = sync_one(bucket, "last.csv", "id,name\r\n1,Ada\r\n2,Grace")
-    assert rows == [{"id": 1, "name": "Ada"}, {"id": 2, "name": "Grace"}]
+    assert rows == [{"id": "1", "name": "Ada"}, {"id": "2", "name": "Grace"}]
 
 
 def test_csv_with_only_a_bom_has_no_columns(bucket):
@@ -153,9 +157,9 @@ def test_csv_with_quoted_newlines_and_quotes(bucket):
     body = 'id,note\n1,"line one\nline two"\n2,"say ""hi"", ok"\n3,"a\r\nb"\n'
     _, rows = sync_one(bucket, "notes.csv", body)
     assert rows == [
-        {"id": 1, "note": "line one\nline two"},
-        {"id": 2, "note": 'say "hi", ok'},
-        {"id": 3, "note": "a\r\nb"},
+        {"id": "1", "note": "line one\nline two"},
+        {"id": "2", "note": 'say "hi", ok'},
+        {"id": "3", "note": "a\r\nb"},
     ]
 
 
@@ -163,7 +167,7 @@ def test_csv_with_a_line_that_crosses_the_sniff_window(bucket):
     long_value = "x" * 20000
     body = f"id,note\n1,{long_value}\n2,short\n"
     _, rows = sync_one(bucket, "long.csv", body)
-    assert rows == [{"id": 1, "note": long_value}, {"id": 2, "note": "short"}]
+    assert rows == [{"id": "1", "note": long_value}, {"id": "2", "note": "short"}]
 
 
 @pytest.mark.parametrize(
@@ -173,7 +177,7 @@ def test_csv_with_a_line_that_crosses_the_sniff_window(bucket):
 def test_delimiters_are_sniffed(bucket, key, delimiter):
     body = f"id{delimiter}name{delimiter}city\n1{delimiter}Ada{delimiter}Paris, FR\n"
     _, rows = sync_one(bucket, key, body)
-    assert rows == [{"id": 1, "name": "Ada", "city": "Paris, FR"}]
+    assert rows == [{"id": "1", "name": "Ada", "city": "Paris, FR"}]
 
 
 @pytest.mark.parametrize(
@@ -203,9 +207,9 @@ def test_ragged_rows(bucket):
     properties, rows = sync_one(bucket, "ragged.csv", body)
     assert "column_4" in properties
     assert rows == [
-        {"id": 1, "name": "Ada", "city": None, "column_4": None},
-        {"id": 2, "name": "Grace", "city": "NYC", "column_4": "extra"},
-        {"id": 3, "name": "Alan", "city": "London", "column_4": None},
+        {"id": "1", "name": "Ada", "city": None, "column_4": None},
+        {"id": "2", "name": "Grace", "city": "NYC", "column_4": "extra"},
+        {"id": "3", "name": "Alan", "city": "London", "column_4": None},
     ]
 
 
@@ -219,7 +223,7 @@ def test_duplicate_and_blank_headers(bucket):
         "column_4",
         "name_3",
     ]
-    assert rows == [{"id": 1, "name": "a", "name_2": "b", "column_4": "c", "name_3": "d"}]
+    assert rows == [{"id": "1", "name": "a", "name_2": "b", "column_4": "c", "name_3": "d"}]
 
 
 def test_column_names():

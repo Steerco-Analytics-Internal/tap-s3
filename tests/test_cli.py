@@ -32,7 +32,8 @@ def test_discover_then_sync_with_catalog_and_state(bucket, tmp_path):
     assert accounts["key_properties"] == ["_s3_key", "_row_number"]
     assert accounts["replication_key"] == "_s3_last_modified"
     assert accounts["replication_method"] == "INCREMENTAL"
-    assert accounts["schema"]["properties"]["arr"]["type"] == ["number", "null"]
+    assert accounts["schema"]["properties"]["arr"]["type"] == ["string", "null"]
+    assert entries["contacts"]["schema"]["properties"]["id"]["type"] == ["integer", "null"]
     root_metadata = next(m for m in accounts["metadata"] if m["breadcrumb"] == [])
     assert root_metadata["metadata"]["valid-replication-keys"] == ["_s3_last_modified"]
 
@@ -63,7 +64,7 @@ def test_discover_then_sync_with_catalog_and_state(bucket, tmp_path):
     assert types[-1] == "STATE"
 
     record_values = [(m["stream"], m["record"]["id"]) for m in messages if m["type"] == "RECORD"]
-    assert record_values == [("accounts", 1), ("contacts", 8)]
+    assert record_values == [("accounts", "1"), ("contacts", 8)]
     final = messages[-1]["value"]["bookmarks"]
     assert final["accounts"]["replication_key_value"] == window_end()
     assert final["contacts"]["replication_key_value"] == window_end()

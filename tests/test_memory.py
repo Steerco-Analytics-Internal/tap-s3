@@ -41,7 +41,7 @@ def check_streaming(monkeypatch, bucket, key, body):
     rows = stream_rows(key)
     reads.clear()
     first = next(rows)
-    assert first["id"] == 1
+    assert str(first["id"]) == "1"
     read_before_first_row = sum(reads)
     assert read_before_first_row <= 2 * client_module.STREAM_BUFFER_BYTES
     count = 1 + sum(1 for _ in rows)

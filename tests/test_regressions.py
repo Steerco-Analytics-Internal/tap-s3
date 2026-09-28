@@ -60,6 +60,14 @@ def sync_capturing(catalog, **settings):
     return messages, error
 
 
+def with_integer_id(catalog):
+    """Type the `id` column as an integer, like a catalog saved before
+    delimited columns became text. A non-numeric CSV value then fails."""
+    for entry in catalog["streams"]:
+        entry["schema"]["properties"]["id"] = {"type": ["integer", "null"]}
+    return catalog
+
+
 # Finding 1: late objects are skipped.
 
 
@@ -121,7 +129,7 @@ def test_a_changed_etag_inside_the_window_is_read_again(bucket, clock):
     bucket.put("orders/a.csv", "id\n1\n2\n", minutes(50))
     clock(70)
     second = sync(catalog, state=last_state(first))
-    assert [r["id"] for r in records(second, "orders")] == [1, 2]
+    assert [r["id"] for r in records(second, "orders")] == ["1", "2"]
 
 
 def test_lookback_minutes_zero_uses_the_listing_time(bucket, clock):
@@ -236,8 +244,9 @@ def test_incremental_mode_missing_means_true(bucket):
 
 
 def test_type_break_message_does_not_promise_rediscovery(bucket):
-    lines = ["id,amount"] + [f"{i},{i}" for i in range(1, 1101)] + ["1101,N/A"]
-    bucket.put("payments.csv", "\n".join(lines) + "\n")
+    lines = [json.dumps({"id": i, "amount": i}) for i in range(1, 1101)]
+    lines.append(json.dumps({"id": 1101, "amount": "N/A"}))
+    bucket.put("payments.jsonl", "\n".join(lines) + "\n")
     with pytest.raises(ObjectParseError) as caught:
         sync()
     message = str(caught.value)
@@ -302,7 +311,7 @@ def test_bom_is_stripped_before_the_cp1252_fallback(bucket):
     catalog = discover()
     assert "id" in schemas(catalog)["legacy"]
     stream_records = records(sync(select_all(catalog)), "legacy")
-    assert stream_records[0]["id"] == 1
+    assert stream_records[0]["id"] == "1"
     assert stream_records[0]["name"] == "Café"
 
 
@@ -310,14 +319,14 @@ def test_bom_is_stripped_in_gzipped_csv(bucket):
     import gzip
 
     bucket.put("legacy.csv.gz", gzip.compress(b"\xef\xbb\xbfid\n1\n"))
-    assert records(sync(), "legacy")[0]["id"] == 1
+    assert records(sync(), "legacy")[0]["id"] == "1"
 
 
 # Finding 8: naive datetimes.
 
 
 def test_naive_text_timestamps_are_utc(bucket):
-    bucket.put("events.csv", "id,at\n1,2026-09-01T10:00:00\n2,2026-09-02\n")
+    bucket.put("events.jsonl", '{"at": "2026-09-01T10:00:00"}\n{"at": "2026-09-02"}\n')
     stream_records = records(sync(), "events")
     assert [r["at"] for r in stream_records] == [
         "2026-09-01T10:00:00+00:00",
@@ -387,7 +396,7 @@ def test_source_columns_named_like_metadata_are_renamed(bucket, tap_logs):
     assert record["_s3_key"] == "files.csv"
     assert record["_row_number"] == 1
     assert record["_s3_key_source"] == "source-key"
-    assert record["_row_number_source"] == 99
+    assert record["_row_number_source"] == "99"
     warnings = [m for m in tap_logs if "_s3_key_source" in m]
     assert warnings, tap_logs
 
@@ -438,7 +447,7 @@ def test_large_json_is_streamed(monkeypatch, bucket):
 def test_no_bookmark_lands_mid_object(bucket, monkeypatch):
     bucket.put("orders/a.csv", "id\n1\n2\n", minutes(1))
     bucket.put("orders/b.csv", "id\n3\n4\n5\n", minutes(2))
-    catalog = select_all(discover())
+    catalog = with_integer_id(select_all(discover()))
     bucket.put("orders/b.csv", "id\n3\n4\nbad\n", minutes(2))
     monkeypatch.setattr("singer_sdk.Stream.STATE_MSG_FREQUENCY", 1)
     messages, error = sync_capturing(catalog)
@@ -455,7 +464,7 @@ def test_no_bookmark_lands_mid_object(bucket, monkeypatch):
 def test_header_only_object_emits_its_bookmark_before_a_failure(bucket):
     bucket.put("orders/a.csv", "id\n", minutes(1))
     bucket.put("orders/b.csv", "id\n2\n", minutes(2))
-    catalog = select_all(discover())
+    catalog = with_integer_id(select_all(discover()))
     bucket.put("orders/b.csv", "id\nbad\n", minutes(2))
     messages, error = sync_capturing(catalog)
     assert isinstance(error, ObjectParseError)
@@ -519,7 +528,7 @@ def test_state_is_written_every_30_seconds(bucket, clock, monkeypatch):
 def test_state_is_written_before_a_failure(bucket, clock):
     bucket.put("orders/a.csv", "id\n1\n", minutes(1))
     bucket.put("orders/b.csv", "id\n2\n", minutes(2))
-    catalog = select_all(discover())
+    catalog = with_integer_id(select_all(discover()))
     bucket.put("orders/b.csv", "id\nbad\n", minutes(2))
     clock(30)
     messages, error = sync_capturing(catalog)
@@ -534,7 +543,10 @@ def test_state_is_written_before_a_failure(bucket, clock):
 
 def test_number_text_that_overflows_becomes_null(bucket):
     bucket.put("m.csv", "id,v\n1,1.5\n2,1e400\n3,-1e400\n")
-    stream_records = records(sync(), "m")
+    catalog = select_all(discover())
+    # A catalog saved before delimited columns became text types v as number.
+    catalog["streams"][0]["schema"]["properties"]["v"] = {"type": ["number", "null"]}
+    stream_records = records(sync(catalog), "m")
     assert [r["v"] for r in stream_records] == [1.5, None, None]
 
 
@@ -771,3 +783,54 @@ def test_other_get_errors_pass_through(bucket):
 
     with pytest.raises(ClientError, match="NoSuchKey"):
         client_module.get_pinned(bucket.client, bucket.name, "missing.csv", '"abc"')
+
+
+# Grant's decision: delimited columns are text.
+
+
+@pytest.mark.parametrize("key", ["pay.csv", "pay.tsv", "pay.txt", "pay.csv.gz"])
+def test_delimited_columns_are_text(bucket, key):
+    import gzip
+
+    lines = ["id\tamount\tpaid\twhen"] + [
+        f"{i}\t{i * 10}\ttrue\t2026-09-01" for i in range(1, 1101)
+    ] + ["1101\tN/A\tmaybe\tsoon", "1102\t\t\t"]
+    body = ("\n".join(lines) + "\n").encode("utf-8")
+    bucket.put(key, gzip.compress(body) if key.endswith(".gz") else body)
+    catalog = discover()
+    properties = schemas(catalog)["pay"]
+    for column in ("id", "amount", "paid", "when"):
+        assert properties[column] == {"type": ["string", "null"]}
+    assert properties["_row_number"] == {"type": ["integer"]}
+    stream_records = records(sync(select_all(catalog)), "pay")
+    assert stream_records[0]["id"] == "1"
+    assert stream_records[0]["amount"] == "10"
+    assert stream_records[0]["paid"] == "true"
+    assert stream_records[0]["when"] == "2026-09-01"
+    assert stream_records[1100]["amount"] == "N/A"
+    assert stream_records[1101]["amount"] is None
+    assert stream_records[1101]["_row_number"] == 1102
+
+
+def test_csv_and_json_in_one_stream_merge_to_string(bucket):
+    bucket.put("orders/a.csv", "id,total,note\n1,5,x\n", minutes(1))
+    bucket.put("orders/b.jsonl", '{"id": 2, "total": 7.5, "extra": 3}\n', minutes(2))
+    properties = schemas(discover())["orders"]
+    assert properties["id"] == {"type": ["string", "null"]}
+    assert properties["total"] == {"type": ["string", "null"]}
+    assert properties["extra"] == {"type": ["integer", "null"]}
+    stream_records = records(sync(), "orders")
+    assert [(r["id"], r["total"]) for r in stream_records] == [("1", "5"), ("2", "7.5")]
+    assert stream_records[1]["extra"] == 3
+
+
+def test_old_catalog_with_a_typed_csv_column_still_fails_clearly(bucket):
+    bucket.put("pay.csv", "id,amount\n1,10\n2,N/A\n")
+    catalog = select_all(discover())
+    catalog["streams"][0]["schema"]["properties"]["amount"] = {"type": ["integer", "null"]}
+    with pytest.raises(ObjectParseError) as caught:
+        sync(catalog)
+    message = str(caught.value)
+    assert "s3://tap-s3-test/pay.csv row 2" in message
+    assert "column 'amount'" in message
+    assert "change the column's type in the catalog" in message

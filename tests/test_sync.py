@@ -88,7 +88,7 @@ def test_bookmark_across_two_runs_with_new_and_modified_objects(bucket, clock):
     clock(70)
     second = sync(catalog, state=state)
     assert keys(second) == ["orders/c.csv", "orders/a.csv"]
-    assert [r["id"] for r in records(second, "orders")] == [3, 1, 10]
+    assert [r["id"] for r in records(second, "orders")] == ["3", "1", "10"]
     assert bookmark(second, "orders") == iso(10)
 
     third = sync(catalog, state=last_state(second))
@@ -155,17 +155,17 @@ def test_header_only_object_still_moves_the_bookmark(bucket):
 
 
 def test_bookmark_waits_for_every_object_with_the_same_timestamp(bucket):
-    bucket.put("orders/a.csv", "id\n1\n", minutes(1))
-    bucket.put("orders/b.csv", "id\n2\n", minutes(2))
-    bucket.put("orders/c.csv", "id\n3\n", minutes(2))
+    bucket.put("orders/a.jsonl", '{"id": 1}\n', minutes(1))
+    bucket.put("orders/b.jsonl", '{"id": 2}\n', minutes(2))
+    bucket.put("orders/c.jsonl", '{"id": 3}\n', minutes(2))
     catalog = select_all(discover())
-    bucket.put("orders/c.csv", "id\nnot a number\n", minutes(2))
+    bucket.put("orders/c.jsonl", '{"id": "not a number"}\n', minutes(2))
     tap = make_tap(catalog=catalog)
     output = io.StringIO()
     with contextlib.redirect_stdout(output), pytest.raises(ObjectParseError):
         tap.sync_all()
     messages = [json.loads(line) for line in output.getvalue().splitlines()]
-    assert keys(messages) == ["orders/a.csv", "orders/b.csv"]
+    assert keys(messages) == ["orders/a.jsonl", "orders/b.jsonl"]
     assert bookmark(messages, "orders") == iso(1)
 
 
@@ -215,10 +215,31 @@ def test_deselected_columns_are_left_out(bucket):
     assert stream_records[0]["name"] == "Ada"
 
 
-def test_type_break_after_the_sample_fails_with_the_row(bucket):
+def test_csv_na_in_a_numeric_looking_column_syncs_as_text(bucket):
     lines = ["id,amount"] + [f"{i},{i * 10}" for i in range(1, 1201)]
     lines[1101] = "1101,N/A"
     bucket.put("payments.csv", "\n".join(lines) + "\n")
+    catalog = select_all(discover())
+    properties = catalog["streams"][0]["schema"]["properties"]
+    assert properties["amount"]["type"] == ["string", "null"]
+    stream_records = records(sync(catalog), "payments")
+    assert len(stream_records) == 1200
+    assert stream_records[0]["amount"] == "10"
+    assert stream_records[1100]["amount"] == "N/A"
+
+
+def test_csv_text_in_an_unsampled_older_object_syncs(bucket):
+    bucket.put("payments/old.csv", "id,amount\n1,unknown\n", minutes(0))
+    for index in range(1, 6):
+        bucket.put(f"payments/new{index}.csv", f"id,amount\n{index},{index}\n", minutes(index))
+    stream_records = records(sync(), "payments")
+    assert stream_records[0]["amount"] == "unknown"
+
+
+def test_json_type_break_after_the_sample_fails_with_the_row(bucket):
+    lines = [json.dumps({"id": i, "amount": i * 10}) for i in range(1, 1201)]
+    lines[1100] = json.dumps({"id": 1101, "amount": "N/A"})
+    bucket.put("payments.jsonl", "\n".join(lines) + "\n")
     catalog = select_all(discover())
     assert catalog["streams"][0]["schema"]["properties"]["amount"]["type"] == [
         "integer",
@@ -227,16 +248,17 @@ def test_type_break_after_the_sample_fails_with_the_row(bucket):
     with pytest.raises(ObjectParseError) as caught:
         sync(catalog)
     message = str(caught.value)
-    assert "s3://tap-s3-test/payments.csv row 1101" in message
+    assert "s3://tap-s3-test/payments.jsonl row 1101" in message
     assert "column 'amount'" in message
     assert "'N/A'" in message
 
 
-def test_type_break_in_an_unsampled_older_object_fails(bucket):
-    bucket.put("payments/old.csv", "id,amount\n1,unknown\n", minutes(0))
+def test_json_type_break_in_an_unsampled_older_object_fails(bucket):
+    bucket.put("payments/old.jsonl", '{"id": 1, "amount": "unknown"}\n', minutes(0))
     for index in range(1, 6):
-        bucket.put(f"payments/new{index}.csv", f"id,amount\n{index},{index}\n", minutes(index))
-    with pytest.raises(ObjectParseError, match="payments/old.csv row 1: column 'amount'"):
+        body = json.dumps({"id": index, "amount": index}) + "\n"
+        bucket.put(f"payments/new{index}.jsonl", body, minutes(index))
+    with pytest.raises(ObjectParseError, match="payments/old.jsonl row 1: column 'amount'"):
         sync()
 
 

@@ -11,12 +11,12 @@ from tap_s3.schema import (
     ColumnTypes,
     RecordConverter,
     ValueConversionError,
+    is_number_text,
     json_value_type,
     merge_types,
     parse_iso_datetime,
     property_schema,
     schema_type,
-    text_type,
     to_json_value,
 )
 
@@ -24,24 +24,32 @@ from tap_s3.schema import (
 @pytest.mark.parametrize(
     "text, expected",
     [
-        ("0", "integer"),
-        ("42", "integer"),
-        ("-7", "integer"),
-        ("+7", "integer"),
-        (" 42 ", "integer"),
-        ("007", "string"),
-        ("3.14", "number"),
-        ("-0.5", "number"),
-        (".5", "number"),
-        ("1e6", "number"),
-        ("1.", "string"),
-        ("-", "string"),
-        ("NaN", "string"),
-        ("inf", "string"),
-        ("1,000", "string"),
-        ("true", "boolean"),
-        ("FALSE", "boolean"),
-        ("yes", "string"),
+        ("0", True),
+        ("42", True),
+        ("-7", True),
+        ("+7", True),
+        (" 42 ", True),
+        ("007", False),
+        ("3.14", True),
+        ("-0.5", True),
+        (".5", True),
+        ("1e6", True),
+        ("1.", False),
+        ("-", False),
+        ("", False),
+        ("NaN", False),
+        ("inf", False),
+        ("1,000", False),
+        ("true", False),
+    ],
+)
+def test_is_number_text(text, expected):
+    assert is_number_text(text) is expected
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
         ("2026-09-01", "date-time"),
         ("2026-09-01T12:30", "date-time"),
         ("2026-09-01 12:30:45", "date-time"),
@@ -51,12 +59,12 @@ from tap_s3.schema import (
         ("2026-02-30", "string"),
         ("09/01/2026", "string"),
         ("Sep 1 2026", "string"),
-        ("20260901", "integer"),
-        ("hello", "string"),
+        ("42", "string"),
+        ("true", "string"),
     ],
 )
-def test_text_type(text, expected):
-    assert text_type(text) == expected
+def test_json_string_type(text, expected):
+    assert json_value_type(text) == expected
 
 
 def test_parse_iso_datetime_normalizes():
@@ -124,28 +132,38 @@ def test_json_values():
     assert properties["list"] == {"type": ["array", "null"]}
 
 
-def test_inference_from_csv(bucket):
+def test_csv_columns_are_text(bucket):
     body = (
-        "int,num,flag,when,iso_date,us_date,mixed,zip,blank,sparse\n"
-        "1,1.5,true,2026-09-01T10:00:00Z,2026-09-01,09/01/2026,1,02134,,\n"
-        "2,2,False,2026-09-02 11:00,2026-09-02,09/02/2026,two,10001,,7\n"
-        ",,,,,,,,,\n"
+        "int,num,flag,when,us_date,zip,blank\n"
+        "1,1.5,true,2026-09-01T10:00:00Z,09/01/2026,02134,\n"
+        ",,,,,,\n"
     )
     bucket.put("types.csv", body)
+    properties = schemas(discover())["types"]
+    for column in ("int", "num", "flag", "when", "us_date", "zip", "blank"):
+        assert properties[column] == {"type": ["string", "null"]}, column
+    assert properties["_s3_key"] == {"type": ["string"]}
+    assert properties["_s3_last_modified"] == {"type": ["string"], "format": "date-time"}
+    assert properties["_row_number"] == {"type": ["integer"]}
+
+
+def test_inference_from_jsonl(bucket):
+    rows = [
+        {"int": 1, "num": 1.5, "flag": True, "when": "2026-09-01T10:00:00Z",
+         "us_date": "09/01/2026", "mixed": 1, "blank": "", "sparse": None},
+        {"int": 2, "num": 2, "flag": False, "when": "2026-09-02",
+         "us_date": "09/02/2026", "mixed": "two", "blank": None, "sparse": 7},
+    ]
+    bucket.put("types.jsonl", "\n".join(json.dumps(row) for row in rows) + "\n")
     properties = schemas(discover())["types"]
     assert properties["int"] == {"type": ["integer", "null"]}
     assert properties["num"] == {"type": ["number", "null"]}
     assert properties["flag"] == {"type": ["boolean", "null"]}
     assert properties["when"] == {"type": ["string", "null"], "format": "date-time"}
-    assert properties["iso_date"] == {"type": ["string", "null"], "format": "date-time"}
     assert properties["us_date"] == {"type": ["string", "null"]}
     assert properties["mixed"] == {"type": ["string", "null"]}
-    assert properties["zip"] == {"type": ["string", "null"]}
     assert properties["blank"] == {"type": ["string", "null"]}
     assert properties["sparse"] == {"type": ["integer", "null"]}
-    assert properties["_s3_key"] == {"type": ["string"]}
-    assert properties["_s3_last_modified"] == {"type": ["string"], "format": "date-time"}
-    assert properties["_row_number"] == {"type": ["integer"]}
 
 
 def test_every_property_is_nullable(bucket):
@@ -166,8 +184,8 @@ def test_column_union_across_files(bucket):
 
 
 def test_types_merge_across_files(bucket):
-    bucket.put("people/a.csv", "id,score\n1,5\n", minutes(1))
-    bucket.put("people/b.csv", "id,score\nx1,5.5\n", minutes(2))
+    bucket.put("people/a.jsonl", '{"id": 1, "score": 5}\n', minutes(1))
+    bucket.put("people/b.jsonl", '{"id": "x1", "score": 5.5}\n', minutes(2))
     properties = schemas(discover())["people"]
     assert properties["id"]["type"] == ["string", "null"]
     assert properties["score"]["type"] == ["number", "null"]
@@ -182,8 +200,9 @@ def test_only_the_5_newest_objects_are_sampled(bucket):
 
 
 def test_only_1000_rows_per_object_are_sampled(bucket):
-    lines = ["id,code"] + [f"{i},{i}" for i in range(1, 1001)] + ["1001,ABC"]
-    bucket.put("codes.csv", "\n".join(lines) + "\n")
+    lines = [json.dumps({"id": i, "code": i}) for i in range(1, 1001)]
+    lines.append(json.dumps({"id": 1001, "code": "ABC"}))
+    bucket.put("codes.jsonl", "\n".join(lines) + "\n")
     assert schemas(discover())["codes"]["code"]["type"] == ["integer", "null"]
 
 
