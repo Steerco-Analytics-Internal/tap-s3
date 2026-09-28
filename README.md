@@ -22,6 +22,17 @@ so the connection form stays the same.
 | `incremental_mode` | No | Defaults to `true`. When `false`, every sync reads every object. |
 | `region` | No | The bucket's region. When empty, the tap calls `GetBucketLocation`. |
 | `start_date` | No | The tap ignores objects last modified before this date and time. |
+| `lookback_minutes` | No | Defaults to 60. How far back each sync checks again for late objects. |
+| `exclude_pattern` | No | A regular expression. The tap ignores objects whose key matches it. |
+
+`incremental_mode` accepts a boolean or a string, because Hotglue can send
+either. The strings `true`, `1` and `yes` mean true, in any case. Other
+strings mean false. A missing value or an empty string means `true`.
+
+`exclude_pattern` is matched with a regex search against the key relative to
+`path_prefix`. Discovery and sync both apply it. Use it to leave out files
+that aren't data, such as manifests. For example, `(^|/)manifest\.json$`
+excludes every `manifest.json`.
 
 The IAM user needs `s3:ListBucket` and `s3:GetObject`. Without `region`, it
 also needs `s3:GetBucketLocation`. If that call is denied, the tap reads the
@@ -53,6 +64,9 @@ names each stream from the object's key, relative to the prefix.
   `accounts.csv` are two streams.
 - A root file and a top-level folder with the same name form one stream. For
   example, `accounts.csv` and `accounts/2026.csv` are both in `accounts`.
+- Different names can clean up to the same stream name, such as the folders
+  `Sales Data` and `Sales-Data`. They form one stream, and the tap logs a
+  warning that names both.
 
 The tap skips these objects without a warning:
 
@@ -73,7 +87,7 @@ The tap picks the format from the extension. Each format also works with a
 | Extension | Format |
 |---|---|
 | `.csv`, `.tsv`, `.txt` | Delimited text. The tap detects `,`, tab, `;` or `\|` from the first 16 KiB. |
-| `.json` | An array of objects, or an object with one field that holds an array of objects. |
+| `.json` | An array of objects, or an object with one field that holds an array of objects. The tap streams it with ijson. |
 | `.jsonl`, `.ndjson` | One JSON object per line. The tap skips blank lines. |
 | `.parquet` | Parquet. The tap reads it by row group with ranged GET requests. |
 
@@ -81,16 +95,15 @@ Delimited files:
 
 - The first row is the header. A blank header becomes `column_N`. A repeated
   header gets a suffix, such as `name_2`.
-- The tap decodes the file as UTF-8 and removes a byte order mark. If the
-  bytes aren't valid UTF-8, it reads the file again as cp1252.
+- The tap removes a UTF-8 byte order mark from the raw bytes, then decodes
+  the file as UTF-8. If the bytes aren't valid UTF-8, it reads the file again
+  as cp1252, then as latin-1. Latin-1 maps every byte, so decoding can't fail.
 - A row with extra cells puts them in `column_N`. A row with missing cells
   gets null for them. The tap skips blank lines.
 - An empty cell is null.
 
-The tap streams delimited and JSONL files. The `.json` format loads the whole
-object, because a JSON document can't be parsed in parts with the standard
-library. A gzipped Parquet file can't seek, so the tap decompresses it to a
-temporary file first.
+The tap streams delimited, JSON and JSONL files. A gzipped Parquet file can't
+seek, so the tap decompresses it to a temporary file first.
 
 ## Schema discovery
 
@@ -110,6 +123,8 @@ that type. Otherwise it is `string`.
 - Nested JSON values become `object` or `array`, with no fixed schema.
 - Parquet columns use the file's own types. A Parquet date becomes a string
   with format `date`.
+- Discovery skips an object it can't parse. It logs the object's key and the
+  error, and samples the next object instead.
 
 Every data column is nullable. Every record also carries these columns:
 
@@ -120,7 +135,8 @@ Every data column is nullable. Every record also carries these columns:
 | `_row_number` | integer | The row's position in the object, starting at 1. |
 
 The primary key is `_s3_key` and `_row_number`. The replication key is
-`_s3_last_modified`.
+`_s3_last_modified`. A source column with one of these names is renamed to
+`<name>_source`, such as `_s3_key_source`, and the tap logs a warning.
 
 ## Sync
 
@@ -128,27 +144,50 @@ During a sync, the tap uses the schemas in the catalog. It doesn't sample the
 bucket again.
 
 - The tap reads a stream's objects oldest first, by LastModified, then by key.
-- With `incremental_mode` set to `true`, the tap skips objects whose
-  LastModified is at or before the stream's bookmark. A modified object has a
-  new LastModified value, so the tap reads it again in full.
-- The bookmark moves after the last row of each object. When several objects
-  share one LastModified value, it moves after the last of them.
+- The tap writes date-time values with a UTC offset. A value without a zone,
+  including a Parquet timestamp, is taken as UTC.
+- A value that JSON can't hold, such as NaN or infinity, becomes null. An
+  empty string is null in every column that isn't a string.
 - The tap drops a column that isn't in the catalog schema. It logs one warning
   per stream.
 - The tap stops early when the SDK's record limit is reached. Hotglue
   field-sample jobs rely on this.
 
+### Incremental reads
+
+A stream reads incrementally when `incremental_mode` is true and the catalog
+doesn't set `replication_method` to `FULL_TABLE`. Otherwise, every sync reads
+every object.
+
+S3 LastModified has one-second resolution, and a multipart upload keeps the
+time it started. So an object can appear after the tap has bookmarked a later
+time. To read such objects, the tap keeps a lookback window:
+
+- The bookmark never passes the listing time minus `lookback_minutes`.
+- Objects read inside the window are kept in state by key and ETag. The next
+  sync lists the window again and skips only those objects.
+- An object whose content changes gets a new ETag, so the tap reads it again.
+- The state keeps only entries newer than the bookmark, so it stays small.
+- The tap skips objects at or before the bookmark.
+
+The bookmark moves after the last row of each object. When several objects
+share one LastModified value, it moves after the last of them. At the end of a
+stream, it moves to the start of the window.
+
+An upload that takes longer than `lookback_minutes` can still be missed. If
+your uploads take longer, raise the setting.
+
 ### Failures
 
 The tap stops the sync on any object it can't parse. The error names the
 `s3://` address and the parse error, so the Hotglue job log shows the file.
-Discovery also stops when an object in its sample can't be parsed.
+To leave a file out on purpose, use `exclude_pattern`.
 
 A value can also break its catalog type after sampling. For example, row 1,101
 of a file holds `N/A` in a column that the sample typed as `integer`. The
 tap stops the sync. The error names the object, the row, the column and the
-value. To fix it, correct the file, or change the column type in the catalog.
-Running discovery again helps only when the bad value is in the sample.
+value. To sync the object, fix the file or change the column's type in the
+catalog.
 
 ## Development
 
