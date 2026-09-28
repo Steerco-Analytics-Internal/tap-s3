@@ -17,6 +17,8 @@ jobs:
           python-version: '3.10'
       - run: pip install --upgrade pip
       - run: pip install poetry==1.6.1
-      - run: poetry install --no-interaction --no-root
-      - run: poetry run python -m compileall -q tap_template
-      - run: poetry run pytest -q
+      - run: poetry install --no-interaction
+      - run: poetry run python -m compileall -q tap_s3
+      - run: poetry run tap-s3 --about
+      # Runs the full suite. pyproject.toml adds coverage and fails under 90%.
+      - run: poetry run pytest
