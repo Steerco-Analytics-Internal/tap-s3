@@ -4,7 +4,7 @@ import datetime
 import json
 import re
 from functools import cached_property
-from typing import Any, Dict, List, Optional, Pattern, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Pattern, Tuple
 
 from singer_sdk import Stream, Tap
 from singer_sdk import typing as th
@@ -252,24 +252,47 @@ class TapS3(Tap):
         _ = self.exclude_pattern
         if self.input_catalog:
             return self._streams_from_catalog()
-        roots: Dict[str, S3Stream] = {}
-        pending: List[Tuple[S3Stream, Lineage, dict]] = []
+        plan = self._stream_plan
+        roots = {
+            name: S3Stream(tap=self, name=name, schema=schema)
+            for name, schema in plan.roots.items()
+        }
+        streams: List[Stream] = list(roots.values())
+        built: Dict[str, S3Stream] = dict(roots)
+        for planned in plan.children:
+            parent = built[planned.parent]
+            root = roots[planned.root]
+            child = S3ChildStream(
+                self, planned.name, planned.schema, root, parent, planned.lineage
+            )
+            root.child_streams.append(child)
+            built[planned.name] = child
+            streams.append(child)
+        return streams
+
+    @cached_property
+    def _stream_plan(self) -> "_StreamPlan":
+        """Name every file stream and child stream the bucket holds.
+
+        Discovery builds its streams from this plan. A sync builds it only to
+        link a catalog child that has lost its parent metadata. The naming is
+        deterministic, so the same bucket gives the same names and lineages.
+        """
+        plan = _StreamPlan()
+        pending: List[Tuple[str, Lineage, dict]] = []
         for name, objects in sorted(self.layout.streams.items()):
             schemas = infer_schemas(self, name, objects)
-            roots[name] = S3Stream(tap=self, name=name, schema=schemas.pop(()))
-            pending.extend((roots[name], lineage, schema) for lineage, schema in schemas.items())
-        streams: List[Stream] = list(roots.values())
-        taken = set(roots)
-        by_lineage: Dict[Tuple[str, Lineage], S3Stream] = {
-            (name, ()): root for name, root in roots.items()
-        }
+            plan.roots[name] = schemas.pop(())
+            pending.extend((name, lineage, schema) for lineage, schema in schemas.items())
+        taken = set(plan.roots)
+        names: Dict[Tuple[str, Lineage], str] = {(name, ()): name for name in plan.roots}
         # Parents come before their children, so a child's name can build on
         # its parent's final name.
         for root, lineage, schema in sorted(
-            pending, key=lambda item: (len(item[1]), item[0].name, item[1])
+            pending, key=lambda item: (len(item[1]), item[0], item[1])
         ):
-            parent = by_lineage[(root.name, lineage[:-1])]
-            natural = child_stream_name(parent.name, lineage[-1])
+            parent = names[(root, lineage[:-1])]
+            natural = child_stream_name(parent, lineage[-1])
             name = natural
             counter = 2
             while name in taken:
@@ -281,31 +304,35 @@ class TapS3(Tap):
                     "for list %s in stream '%s' is named '%s'.",
                     natural,
                     ".".join(lineage[-1]),
-                    parent.name,
+                    parent,
                     name,
                 )
             taken.add(name)
-            child = S3ChildStream(self, name, schema, root, parent, lineage)
-            root.child_streams.append(child)
-            by_lineage[(root.name, lineage)] = child
-            streams.append(child)
-        return streams
+            names[(root, lineage)] = name
+            plan.children.append(_PlannedChild(name, root, parent, lineage, schema))
+        return plan
 
     def _streams_from_catalog(self) -> List[Stream]:
         """Build streams from the catalog, and link each child to its parent.
 
         A child stream's catalog entry names its parent stream and its list
         path in custom metadata at breadcrumb `[]`: PARENT_STREAM_METADATA and
-        LIST_PATH_METADATA. The tap links a child by that metadata only.
+        LIST_PATH_METADATA. The tap links a child by that metadata.
 
-        - A child without the metadata, or whose parent is missing, is skipped
+        - When a catalog store drops the metadata, the tap names the streams
+          in the bucket the way discovery does, and links a child whose name
+          matches a child stream there exactly. Names are unique, so a match
+          is never ambiguous. It never guesses from a name prefix.
+        - A child that can't be linked, or whose parent is missing, is skipped
           with a warning, and its state is left alone.
+        - The tap logs once per child how it linked it.
         - When the catalog leaves out a file stream that the bucket still has,
           and a child needs it, the tap adds it, deselected, to read objects.
         """
         extra = _stream_metadata(self._raw_catalog)
         roots: Dict[str, S3Stream] = {}
         specs: Dict[str, Tuple[str, Path, dict]] = {}
+        how: Dict[str, str] = {}
         for entry in self.input_catalog.streams:  # type: ignore[union-attr]
             name = entry.stream or entry.tap_stream_id
             schema = entry.schema.to_dict()
@@ -320,6 +347,7 @@ class TapS3(Tap):
                     and all(isinstance(part, str) for part in path)
                 ):
                     specs[name] = (parent, tuple(path), schema)
+                    how[name] = "by its catalog metadata"
                 else:
                     self.logger.warning(
                         "Stream '%s' is skipped: its %s or %s metadata is not valid.",
@@ -330,11 +358,20 @@ class TapS3(Tap):
                 continue
             properties = schema.get("properties", {})
             if ROW_KEY_COLUMN in properties and PARENT_ROW_COLUMN in properties:
-                self.logger.warning(
-                    "Stream '%s' is skipped: it looks like a child stream, but its "
-                    "catalog entry has no %s metadata. Run discovery again.",
-                    name,
-                    PARENT_STREAM_METADATA,
+                planned = self._stream_plan.child(name)
+                if planned is None:
+                    self.logger.warning(
+                        "Stream '%s' is skipped: its catalog entry has no %s "
+                        "metadata, and the bucket has no child stream with that "
+                        "name. Run discovery again.",
+                        name,
+                        PARENT_STREAM_METADATA,
+                    )
+                    continue
+                specs[name] = (planned.parent, planned.lineage[-1], schema)
+                how[name] = (
+                    f"by its name, because its catalog entry has no "
+                    f"{PARENT_STREAM_METADATA} metadata"
                 )
                 continue
             roots[name] = S3Stream(tap=self, name=name, schema=schema)
@@ -356,6 +393,12 @@ class TapS3(Tap):
                 root.child_streams.append(child)
                 streams.append(child)
                 built[name] = child
+                self.logger.info(
+                    "Stream '%s' is linked to its parent stream '%s' %s.",
+                    name,
+                    parent_name,
+                    how[name],
+                )
                 return child
             if name not in specs and name in self.layout.streams:
                 hidden = S3Stream(
@@ -402,6 +445,29 @@ class TapS3(Tap):
                 if item.get("breadcrumb") == []:
                     item.setdefault("metadata", {}).update(added)
         return catalog
+
+
+class _PlannedChild(NamedTuple):
+    """A child stream the bucket holds: its name, file stream and parent."""
+
+    name: str
+    root: str
+    parent: str
+    lineage: Lineage
+    schema: dict
+
+
+class _StreamPlan:
+    """The file streams and child streams the bucket holds, with names."""
+
+    def __init__(self) -> None:
+        self.roots: Dict[str, dict] = {}
+        self.children: List[_PlannedChild] = []
+
+    def child(self, name: str) -> Optional[_PlannedChild]:
+        """The planned child stream with exactly this name, or None."""
+        matches = [planned for planned in self.children if planned.name == name]
+        return matches[0] if len(matches) == 1 else None
 
 
 def _read_raw_catalog(catalog: Any) -> Optional[dict]:

@@ -257,11 +257,11 @@ def test_schema_comes_before_records_for_every_stream(bucket):
     assert {"o", "o__a", "o__a__c"} <= seen
 
 
-def test_a_catalog_object_loses_the_parent_metadata(bucket, tap_logs):
+def test_a_catalog_object_links_children_by_name(bucket, tap_logs):
     from singer_sdk._singerlib import Catalog
 
     bucket.put("o.json", json.dumps([{"id": 1, "items": [{"v": 1}]}]))
     catalog = Catalog.from_dict(select_all(discover()))
     tap = make_tap(catalog=catalog)
-    assert sorted(tap.streams) == ["o"]
-    assert any("o__items" in m and "has no tap-s3.parent-stream" in m for m in tap_logs)
+    assert sorted(tap.streams) == ["o", "o__items"]
+    assert any("o__items" in m and "by its name" in m for m in tap_logs)

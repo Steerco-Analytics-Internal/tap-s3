@@ -470,15 +470,15 @@ def test_child_with_a_missing_parent_is_skipped(bucket, tap_logs):
     )
 
 
-def test_child_without_parent_metadata_is_skipped(bucket, tap_logs):
+def test_child_without_parent_metadata_is_linked_by_name(bucket, tap_logs):
     bucket.put("customers_nested/2026-09.json", MODEL_N, minutes(1))
     catalog = select_all(discover())
     for entry in catalog["streams"]:
         if entry["stream"] == ADJUSTMENTS:
             root_metadata(entry).pop("tap-s3.parent-stream")
     messages = sync(catalog)
-    assert {m["stream"] for m in messages if m["type"] == "RECORD"} == {"customers_nested"}
-    assert any(ADJUSTMENTS in m and "has no tap-s3.parent-stream" in m for m in tap_logs)
+    assert len(records(messages, ADJUSTMENTS)) == 20
+    assert any(ADJUSTMENTS in m and "by its name" in m for m in tap_logs)
 
 
 @pytest.mark.parametrize("path", [None, [], "items", [1]])
