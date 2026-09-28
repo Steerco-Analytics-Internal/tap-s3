@@ -159,8 +159,9 @@ underscore encoded, as in `_x5f_s3_key`, and the tap logs a warning.
 ## Nested data
 
 Version 1.1.0 takes nested JSON, JSONL and Parquet data apart into tables,
-so a file can have any shape. Delimited files don't change. A file with no
-nested objects or lists gives the same catalog and records as version 1.0.0.
+so a file can have any shape. Delimited files aren't taken apart. A file with
+no nested objects or lists gives the same catalog and records as version
+1.0.0, except for the renames in [Column names](#column-names).
 
 ### Nested objects become columns
 
@@ -191,6 +192,8 @@ whatever order.
   path. For example, the key `a__b` inside an object becomes `a_x5f__b`.
 - A top-level key that reads as a joined name, such as `a__b`, is encoded
   the same way, so it can't take the column of the path `a.b`.
+- CSV headers follow the same rules as top-level JSON keys, so a CSV header
+  and a JSON key with the same name give the same column.
 - A top-level key named like a metadata column, such as `_s3_key`, gets its
   first underscore encoded, as in `_x5f_s3_key`. The metadata column keeps
   its name. The tap logs one warning per stream for the keys it renames.
@@ -243,21 +246,28 @@ Each child stream's catalog entry records its parent in metadata at breadcrumb
 
 A sync links each child stream to its parent by these keys. A catalog store
 might drop metadata keys it doesn't know. When a child stream's entry has no
-`tap-s3.parent-stream` key, the tap names the streams in the bucket the way
-discovery does, and links the child whose name matches exactly. The naming is
-deterministic, so the same bucket gives the same names. The tap never guesses
-a parent from part of a name. It logs, once per child stream, whether it
-linked the child by its metadata or by its name.
+`tap-s3.parent-stream` key, the tap falls back to names, and logs once per
+sync that you should run discovery again:
+
+- The tap plans only the file streams whose names start the names of the
+  selected child streams, and names their child streams the way discovery
+  does. The naming is deterministic, so the same bucket gives the same names.
+- It links a child stream only when exactly one planned child stream has that
+  name, and the plan gave it that name without a clash suffix, such as `_2`.
+- It skips every child stream of a file stream when a child name under it, in
+  the plan or in the catalog, carries a clash suffix. A suffix means names
+  can move between lists, so a name alone can't be trusted.
+- It skips a child stream whose catalog columns aren't all columns of the
+  planned child stream.
+- It never guesses a parent from part of a name. It logs, once per child
+  stream, whether it linked the child by its metadata or by its name.
 
 A child stream that the tap can't link is skipped with a warning, and its
-bookmark doesn't move. That happens when the parent is missing, or when the
-bucket no longer has a child stream with that name. For example, say a file
-`orders__items.json` appears after discovery, next to the list `items` in
-`orders.json`. The file stream then takes the name `orders__items`, and the
-list's child stream becomes `orders__items_2`. A catalog entry
-`orders__items` without the metadata no longer names a child stream, so the
-tap skips it rather than guess. With the metadata, the child stream still
-syncs. To pick up such a change, run discovery again.
+bookmark doesn't move. For example, say a file `orders__items.json` appears
+after discovery, next to the list `items` in `orders.json`. The list's child
+stream becomes `orders__items_2`, so a catalog entry `orders__items` without
+the metadata is skipped rather than guessed. With the metadata, the child
+stream still syncs. To pick up such a change, run discovery again.
 
 ### Other lists become JSON text
 
