@@ -25,8 +25,8 @@ so the connection form stays the same.
 | `lookback_minutes` | No | Defaults to 60. How far back each sync checks again for late objects. |
 | `exclude_pattern` | No | A regular expression. The tap ignores objects whose key matches it. |
 
-`incremental_mode` accepts a boolean or a string, because Hotglue can send
-either. The strings `true`, `yes` and `1` mean true, and `false`, `no` and
+`incremental_mode` accepts a boolean, a string, or the number 0 or 1, because
+Hotglue can send any of them. The strings `true`, `yes` and `1` mean true, and `false`, `no` and
 `0` mean false. Case and surrounding spaces don't matter. A missing value or
 an empty string means `true`. Any other value is a config error.
 
@@ -180,9 +180,10 @@ time. To read such objects, the tap keeps a lookback window:
 - State written before the window existed has no `window` key. The first
   sync lowers its bookmark once to the window start.
 
-The tap writes STATE after every 100 objects or 30 seconds, whichever comes
-first. It also writes STATE at the end of each stream, and before it stops on
-an error.
+The tap writes STATE after 30 seconds, or after a number of objects equal to
+a tenth of the window, with a minimum of 100. So the bytes of STATE written
+grow linearly with the number of objects. It also writes STATE at the end of
+each stream, and before it stops on an error.
 
 The bookmark moves after the last row of each object. When several objects
 share one LastModified value, it moves after the last of them. At the end of a
@@ -192,6 +193,12 @@ An upload that takes longer than `lookback_minutes` can still be missed. If
 your uploads take longer, raise the setting.
 
 ### Failures
+
+The tap pins every read of an object to the ETag from the listing, using
+`IfMatch`. This covers reopening a file, such as the second pass over a JSON
+wrapper or an encoding fallback, and each ranged read of a Parquet file. If
+an object changes during the sync, the stream fails with a message that says
+so. The next run reads the new version.
 
 The tap stops the sync on any object it can't parse. The error names the
 `s3://` address and the parse error, so the Hotglue job log shows the file.
