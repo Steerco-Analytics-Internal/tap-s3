@@ -7,11 +7,13 @@ import contextlib
 import io
 import json
 import math
+import tracemalloc
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from tests.conftest import (
+    CONFIG,
     bookmark,
     discover,
     iso,
@@ -25,6 +27,7 @@ from tests.conftest import (
 )
 
 from tap_s3 import client as client_module
+from tap_s3.formats import FileFormat, ObjectSource, iter_rows
 from tap_s3.streams import ObjectParseError
 from tap_s3.tap import TapS3
 
@@ -95,22 +98,19 @@ def test_window_state_is_pruned(bucket, clock):
     first = sync(catalog)
     stream_state = last_state(first)["bookmarks"]["orders"]
     assert stream_state["replication_key_value"] == iso(40)
-    assert sorted(item["key"] for item in stream_state["window"]) == [
-        "orders/a.csv",
-        "orders/b.csv",
-    ]
-    assert all(item["etag"] for item in stream_state["window"])
+    assert sorted(stream_state["window"]) == ["orders/a.csv", "orders/b.csv"]
+    assert all(stream_state["window"].values())
 
     clock(140)
     second = sync(catalog, state=last_state(first))
     stream_state = last_state(second)["bookmarks"]["orders"]
     assert keys(second) == []
     assert stream_state["replication_key_value"] == iso(80)
-    assert [item["key"] for item in stream_state["window"]] == ["orders/b.csv"]
+    assert list(stream_state["window"]) == ["orders/b.csv"]
 
     clock(200)
     third = sync(catalog, state=last_state(second))
-    assert last_state(third)["bookmarks"]["orders"]["window"] == []
+    assert last_state(third)["bookmarks"]["orders"]["window"] == {}
 
 
 def test_a_changed_etag_inside_the_window_is_read_again(bucket, clock):
@@ -415,11 +415,10 @@ def spy_reads(monkeypatch):
     return reads
 
 
-@pytest.mark.parametrize("wrapped", [False, True], ids=["array", "wrapped"])
-def test_large_json_is_streamed(monkeypatch, bucket, wrapped):
+def test_large_json_is_streamed(monkeypatch, bucket):
     rows = 200_000
     items = ",".join(f'{{"id": {i}, "email": "user{i}@example.com"}}' for i in range(1, rows + 1))
-    document = f'{{"count": {rows}, "data": [{items}]}}' if wrapped else f"[{items}]"
+    document = f"[{items}]"
     body = document.encode("utf-8")
     bucket.put("big.json", body)
     catalog = select_all(make_tap().catalog_dict)
@@ -449,8 +448,7 @@ def test_no_bookmark_lands_mid_object(bucket, monkeypatch):
     for state in states:
         stream_state = state.get("bookmarks", {}).get("orders", {})
         assert stream_state.get("replication_key_value") in (None, iso(1))
-        window_keys = [item["key"] for item in stream_state.get("window", [])]
-        assert "orders/b.csv" not in window_keys
+        assert "orders/b.csv" not in stream_state.get("window", {})
 
 
 def test_header_only_object_emits_its_bookmark_before_a_failure(bucket):
@@ -484,3 +482,167 @@ def test_parquet_is_read_with_ranged_requests(bucket):
         start, end = header[len("bytes="):].split("-")
         transferred += int(end) - int(start) + 1
     assert transferred < len(body) / 10
+
+
+# Delta finding A: STATE size grows with the square of the window.
+
+
+def test_state_stays_small_with_many_objects_in_the_window(bucket, clock):
+    for index in range(1500):
+        bucket.put(f"events/part-{index:05d}.csv", f"id\n{index}\n", minutes(1000))
+    clock(1010)
+    catalog = select_all(discover())
+    messages = sync(catalog)
+    states = [m for m in messages if m["type"] == "STATE"]
+    assert len(records(messages, "events")) == 1500
+    assert len(states) <= 25
+    assert sum(len(json.dumps(m)) for m in states) < 2_000_000
+    window = last_state(messages)["bookmarks"]["events"]["window"]
+    assert isinstance(window, dict) and len(window) == 1500
+
+
+def test_state_is_written_every_30_seconds(bucket, clock, monkeypatch):
+    ticks = iter(range(0, 10_000, 31))
+    monkeypatch.setattr("tap_s3.streams.monotonic", lambda: next(ticks))
+    for index in range(3):
+        bucket.put(f"orders/{index}.csv", "id\n1\n", minutes(index))
+    messages = sync()
+    values = [
+        m["value"].get("bookmarks", {}).get("orders", {}).get("replication_key_value")
+        for m in messages
+        if m["type"] == "STATE"
+    ]
+    assert iso(0) in values and iso(1) in values
+
+
+def test_state_is_written_before_a_failure(bucket, clock):
+    bucket.put("orders/a.csv", "id\n1\n", minutes(1))
+    bucket.put("orders/b.csv", "id\n2\n", minutes(2))
+    catalog = select_all(discover())
+    bucket.put("orders/b.csv", "id\nbad\n", minutes(2))
+    clock(30)
+    messages, error = sync_capturing(catalog)
+    assert isinstance(error, ObjectParseError)
+    stream_state = last_state(messages)["bookmarks"]["orders"]
+    assert stream_state["replication_key_value"] == iso(-30)
+    assert list(stream_state["window"]) == ["orders/a.csv"]
+
+
+# Delta finding B: text that overflows to infinity.
+
+
+def test_number_text_that_overflows_becomes_null(bucket):
+    bucket.put("m.csv", "id,v\n1,1.5\n2,1e400\n3,-1e400\n")
+    stream_records = records(sync(), "m")
+    assert [r["v"] for r in stream_records] == [1.5, None, None]
+
+
+# Delta finding C: the JSON wrapper rule.
+
+
+def test_json_wrapper_ignores_a_sibling_array_with_non_objects(bucket):
+    bucket.put("w.json", json.dumps({"data": [{"id": 1}], "notes": [{"n": 1}, "x"]}))
+    stream_records = records(sync(), "w")
+    assert [r["id"] for r in stream_records] == [1]
+
+
+def test_json_wrapper_ignores_a_first_array_with_non_objects(bucket):
+    bucket.put("w.json", json.dumps({"notes": [{"n": 1}, "x"], "data": [{"id": 1}]}))
+    stream_records = records(sync(), "w")
+    assert [r["id"] for r in stream_records] == [1]
+
+
+def test_second_array_of_objects_is_seen_at_discovery(bucket, tap_logs):
+    data = [{"id": i} for i in range(1200)]
+    bucket.put("w.json", json.dumps({"data": data, "other": [{"x": 1}]}))
+    catalog = discover()
+    assert any(
+        "s3://tap-s3-test/w.json" in m and "more than one array" in m for m in tap_logs
+    )
+    with pytest.raises(ObjectParseError, match="more than one array"):
+        sync(select_all(catalog))
+
+
+# Delta finding D: state written before the window existed.
+
+
+def test_old_state_without_a_window_is_lowered_once(bucket, clock):
+    clock(100)
+    bucket.put("orders/late.csv", "id\n1\n", minutes(80))
+    state = {"bookmarks": {"orders": {"replication_key_value": iso(90)}}}
+    messages = sync(state=state)
+    assert keys(messages) == ["orders/late.csv"]
+
+
+def test_state_with_a_window_is_not_lowered(bucket, clock):
+    clock(100)
+    bucket.put("orders/late.csv", "id\n1\n", minutes(80))
+    state = {"bookmarks": {"orders": {"replication_key_value": iso(90), "window": {}}}}
+    assert keys(sync(state=state)) == []
+
+
+# Delta finding E: unknown incremental_mode strings.
+
+
+@pytest.mark.parametrize("value", ["maybe", "ture", "2"])
+def test_unknown_incremental_mode_fails_clearly(bucket, value):
+    bucket.put("orders/a.csv", "id\n1\n")
+    with pytest.raises(Exception, match="incremental_mode"):
+        sync(incremental_mode=value)
+    with pytest.raises(Exception, match="incremental_mode"):
+        discover(incremental_mode=value)
+
+
+@pytest.mark.parametrize(
+    "value, expected", [(" No ", False), ("YES", True), (" 0 ", False), ("  ", True)]
+)
+def test_incremental_mode_words(value, expected):
+    from tap_s3.tap import parse_flag
+
+    assert parse_flag(value, default=True) is expected
+
+
+class _FileSource(ObjectSource):
+    """An object source over a local file, so moto's copies don't count."""
+
+    def __init__(self, path):
+        self.path = path
+
+    @contextlib.contextmanager
+    def open(self):
+        with open(self.path, "rb") as handle:
+            yield handle
+
+
+@pytest.mark.parametrize("wrapped", [False, True], ids=["array", "wrapped"])
+def test_large_json_uses_bounded_memory(tmp_path, wrapped):
+    rows = 200_000
+    path = tmp_path / "big.json"
+    with open(path, "w") as handle:
+        handle.write('{"count": 1, "data": [' if wrapped else "[")
+        for i in range(1, rows + 1):
+            handle.write(("," if i > 1 else "") + f'{{"id": {i}, "email": "u{i}@example.com"}}')
+        handle.write("]}" if wrapped else "]")
+    size = path.stat().st_size
+    tracemalloc.start()
+    try:
+        reader = iter_rows(_FileSource(path), FileFormat(".json", False))
+        count = sum(1 for _ in reader)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert count == rows
+    assert peak < size / 5
+
+
+def test_unknown_incremental_mode_fails_discovery_without_validation(bucket):
+    from singer_sdk.exceptions import ConfigValidationError
+
+    tap = TapS3(
+        config={**CONFIG, "incremental_mode": "maybe"},
+        parse_env_config=False,
+        validate_config=False,
+        setup_mapper=False,
+    )
+    with pytest.raises(ConfigValidationError, match="Use true, false, yes, no, 1 or 0"):
+        tap.discover_streams()

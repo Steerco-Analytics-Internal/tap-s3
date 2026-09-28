@@ -67,7 +67,7 @@ def test_discover_then_sync_with_catalog_and_state(bucket, tmp_path):
     final = messages[-1]["value"]["bookmarks"]
     assert final["accounts"]["replication_key_value"] == window_end()
     assert final["contacts"]["replication_key_value"] == window_end()
-    assert final["contacts"]["window"] == []
+    assert final["contacts"]["window"] == {}
 
 
 def test_discover_without_credentials_fails_clearly(bucket, tmp_path):

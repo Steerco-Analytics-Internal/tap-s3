@@ -41,7 +41,8 @@ def test_objects_are_read_oldest_first(bucket):
     assert bookmark(messages, "orders") == window_end()
 
 
-def test_bookmark_moves_after_each_object(bucket):
+def test_bookmark_moves_after_each_object(bucket, monkeypatch):
+    monkeypatch.setattr("tap_s3.streams.CHECKPOINT_OBJECTS", 1)
     bucket.put("orders/a.csv", "id\n1\n2\n", minutes(1))
     bucket.put("orders/b.csv", "id\n3\n", minutes(2))
     messages = sync()
@@ -54,8 +55,10 @@ def test_bookmark_moves_after_each_object(bucket):
         for m in messages
         if m["type"] in ("RECORD", "STATE")
     ]
-    # The SDK writes an empty STATE first and a final STATE last. Once every
-    # object is read, the bookmark moves to the start of the lookback window.
+    # The SDK writes an empty STATE first and a final STATE last. The tap
+    # writes STATE every CHECKPOINT_OBJECTS objects, so here it writes one
+    # checkpoint per object. Once every object is read, the bookmark moves to
+    # the start of the lookback window.
     assert sequence == [
         ("STATE", None),
         ("RECORD", "orders/a.csv"),
@@ -78,7 +81,7 @@ def test_bookmark_across_two_runs_with_new_and_modified_objects(bucket, clock):
     state = last_state(first)
     assert state["bookmarks"]["orders"]["replication_key"] == "_s3_last_modified"
     assert state["bookmarks"]["orders"]["replication_key_value"] == iso(2)
-    assert state["bookmarks"]["orders"]["window"] == []
+    assert state["bookmarks"]["orders"]["window"] == {}
 
     bucket.put("orders/c.csv", "id\n3\n", minutes(3))
     bucket.put("orders/a.csv", "id\n1\n10\n", minutes(4))

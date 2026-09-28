@@ -7,6 +7,7 @@ from typing import Any, List, Optional, Pattern
 
 from singer_sdk import Stream, Tap
 from singer_sdk import typing as th
+from singer_sdk.exceptions import ConfigValidationError
 
 from tap_s3.client import S3Bucket
 from tap_s3.layout import BucketLayout, build_layout, normalize_prefix
@@ -21,11 +22,17 @@ def utc_now() -> datetime.datetime:
     return datetime.datetime.now(datetime.timezone.utc)
 
 
-def parse_flag(value: Any, default: bool) -> bool:
+TRUE_WORDS = ("true", "1", "yes")
+FALSE_WORDS = ("false", "0", "no")
+FLAG_PATTERN = r"^\s*((?i:true|false|yes|no)|[01])?\s*$"
+
+
+def parse_flag(value: Any, default: bool, name: str = "incremental_mode") -> bool:
     """Read a boolean setting that Hotglue might send as a string.
 
-    `true`, `1` and `yes` mean true, in any case. Other strings mean false.
-    None and an empty string mean the default.
+    `true`, `1` and `yes` mean true. `false`, `0` and `no` mean false. Case
+    and surrounding spaces don't matter. None and an empty string mean the
+    default. Any other value is a config error.
     """
     if value is None:
         return default
@@ -34,7 +41,14 @@ def parse_flag(value: Any, default: bool) -> bool:
     text = str(value).strip().lower()
     if not text:
         return default
-    return text in ("true", "1", "yes")
+    if text in TRUE_WORDS:
+        return True
+    if text in FALSE_WORDS:
+        return False
+    raise ConfigValidationError(
+        f"The {name} setting must be true or false, not {value!r}. "
+        "Use true, false, yes, no, 1 or 0."
+    )
 
 
 class TapS3(Tap):
@@ -76,7 +90,9 @@ class TapS3(Tap):
         ),
         th.Property(
             "incremental_mode",
-            th.CustomType({"type": ["boolean", "string", "null"]}),
+            th.CustomType(
+                {"type": ["boolean", "string", "null"], "pattern": FLAG_PATTERN}
+            ),
             default=True,
             description=(
                 "When true, a sync reads only objects modified after the last "
@@ -204,6 +220,10 @@ class TapS3(Tap):
         With a catalog, the catalog's schemas are used as they are, and the
         bucket is not sampled again.
         """
+        # Check the settings that config validation doesn't cover, before any
+        # stream reads. Discovery skips config validation altogether.
+        _ = self.incremental_mode
+        _ = self.exclude_pattern
         if self.input_catalog:
             return [
                 S3Stream(

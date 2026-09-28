@@ -253,7 +253,7 @@ def test_json_wrapper_with_only_an_empty_array(bucket):
         ('[{"a": 1}', "IncompleteJSONError"),
         ('[{"a": 1}] trailing', "IncompleteJSONError"),
         ("   ", "IncompleteJSONError"),
-        ('{"a": [{"x": 1}, 2]}', "item 2 of field 'a' is not a JSON object"),
+        ('{"a": [{"x": 1}, 2]}', "no single field"),
     ],
 )
 def test_bad_json_fails_with_the_key(bucket, tap_logs, document, message):

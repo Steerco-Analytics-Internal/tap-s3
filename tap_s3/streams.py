@@ -8,6 +8,7 @@ import contextlib
 import datetime
 import itertools
 import logging
+from time import monotonic
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -45,6 +46,8 @@ SAMPLE_OBJECTS = 5
 SAMPLE_ROWS = 1000
 
 WINDOW_STATE_KEY = "window"
+CHECKPOINT_OBJECTS = 100
+CHECKPOINT_SECONDS = 30
 
 
 class ObjectParseError(Exception):
@@ -190,47 +193,68 @@ class S3Stream(Stream):
         keeps the time it started. So an object can appear after a later
         bookmark was written. To catch it, the bookmark never passes the
         listing time minus `lookback_minutes`. Objects read inside that
-        window are kept in state by key and ETag, and are skipped next time.
+        window are kept in state as a map of key to ETag, and are skipped
+        next time.
 
         The bookmark moves after each object's last row. When several objects
         share a LastModified value, it moves after the last of them, so a
         failure between them can't skip one on the next run.
         """
-        state = self.get_context_state(context)
-        window_start = self.s3_tap.window_start
-        objects = self._objects_to_read(state)
-        converter = RecordConverter(self.schema["properties"])
-        for index, obj in enumerate(objects):
-            yield from self._object_records(obj, converter)
-            following = objects[index + 1] if index + 1 < len(objects) else None
-            shares_time = (
-                following is not None and following.last_modified == obj.last_modified
-            )
-            bookmark = None if shares_time else min(obj.last_modified, window_start)
-            self._save_progress(state, bookmark, obj)
-        if not objects:
-            self.logger.info("No new objects for stream '%s'.", self.name)
-        # Every listed object up to the window start is now read or skipped.
-        self._save_progress(state, window_start, None)
-
-    def _objects_to_read(self, state: dict) -> List[S3Object]:
         tap = self.s3_tap
-        objects = sorted(
-            tap.layout.streams.get(self.name, []), key=lambda obj: obj.sort_key
-        )
-        start_date = tap.start_date
+        window_start = tap.window_start
+        listed = tap.layout.streams.get(self.name, [])
+        progress = _Progress(self.get_context_state(context), listed, window_start)
+        objects = self._objects_to_read(listed, progress)
+        converter = RecordConverter(self.schema["properties"])
+        since_checkpoint = 0
+        last_checkpoint = monotonic()
+        try:
+            for index, obj in enumerate(objects):
+                yield from self._object_records(obj, converter)
+                following = objects[index + 1] if index + 1 < len(objects) else None
+                shares_time = (
+                    following is not None
+                    and following.last_modified == obj.last_modified
+                )
+                progress.finish(
+                    obj, None if shares_time else min(obj.last_modified, window_start)
+                )
+                since_checkpoint += 1
+                if (
+                    since_checkpoint >= CHECKPOINT_OBJECTS
+                    or monotonic() - last_checkpoint >= CHECKPOINT_SECONDS
+                ):
+                    self._checkpoint(progress)
+                    since_checkpoint = 0
+                    last_checkpoint = monotonic()
+            if not objects:
+                self.logger.info("No new objects for stream '%s'.", self.name)
+            # Every listed object up to the window start is now read or skipped.
+            progress.raise_bookmark(window_start)
+        except Exception:
+            # Keep the progress of the objects that finished before the error.
+            self._checkpoint(progress)
+            raise
+        self._checkpoint(progress)
+
+    def _objects_to_read(
+        self, listed: List[S3Object], progress: "_Progress"
+    ) -> List[S3Object]:
+        objects = sorted(listed, key=lambda obj: obj.sort_key)
+        start_date = self.s3_tap.start_date
         if start_date is not None:
             objects = [obj for obj in objects if obj.last_modified >= start_date]
         if not self.is_incremental:
             return objects
-        bookmark = self._bookmark(state)
-        already_read = {(item["key"], item["etag"]) for item in _window(state)}
-        return [
-            obj
-            for obj in objects
-            if (bookmark is None or obj.last_modified > bookmark)
-            and (obj.key, obj.etag) not in already_read
-        ]
+        return [obj for obj in objects if not progress.already_read(obj)]
+
+    def _checkpoint(self, progress: "_Progress") -> None:
+        """Prune the window into state, then write a STATE message."""
+        progress.prune()
+        # The SDK only flushes state after it writes a record. Mark it dirty so
+        # an object with no rows still moves the bookmark.
+        self._is_state_flushed = False
+        self._write_state_message()
 
     def _object_records(
         self, obj: S3Object, converter: RecordConverter
@@ -275,54 +299,6 @@ class S3Stream(Stream):
                 uri,
             )
 
-    @staticmethod
-    def _bookmark(state: dict) -> Optional[datetime.datetime]:
-        if state.get("replication_key") not in (None, LAST_MODIFIED_COLUMN):
-            return None
-        value = state.get("replication_key_value")
-        return parse_timestamp(value) if value else None
-
-    def _save_progress(
-        self,
-        state: dict,
-        bookmark: Optional[datetime.datetime],
-        read: Optional[S3Object],
-    ) -> None:
-        """Record a finished object and move the bookmark, then write state.
-
-        The bookmark only moves forward. Window entries at or before it are
-        pruned, because the bookmark filter already skips those objects.
-        """
-        current = self._bookmark(state)
-        if bookmark is not None and (current is None or bookmark > current):
-            current = bookmark
-        window = [
-            item
-            for item in _window(state)
-            if read is None or (item["key"], item["etag"]) != (read.key, read.etag)
-        ]
-        if read is not None:
-            window.append(
-                {
-                    "key": read.key,
-                    "etag": read.etag,
-                    "last_modified": read.last_modified.isoformat(),
-                }
-            )
-        if current is not None:
-            window = [
-                item
-                for item in window
-                if parse_timestamp(item["last_modified"]) > current
-            ]
-            state["replication_key"] = LAST_MODIFIED_COLUMN
-            state["replication_key_value"] = current.isoformat()
-        state[WINDOW_STATE_KEY] = window
-        # The SDK only flushes state after it writes a record. Mark it dirty so
-        # an object with no rows still moves the bookmark.
-        self._is_state_flushed = False
-        self._write_state_message()
-
     def _increment_stream_state(
         self, latest_record: Dict[str, Any], *, context: Optional[dict] = None
     ) -> None:
@@ -333,6 +309,76 @@ class S3Stream(Stream):
         """
 
 
-def _window(state: dict) -> List[Dict[str, str]]:
-    """The objects read inside the lookback window, from state."""
-    return list(state.get(WINDOW_STATE_KEY) or [])
+class _Progress:
+    """A stream's bookmark and window, kept in its state dict.
+
+    Every update is O(1) and changes the state dict in place, so a STATE
+    message written by the SDK at any time holds only finished objects.
+    Pruning walks the window, so it runs only at checkpoints.
+    """
+
+    def __init__(
+        self,
+        state: dict,
+        listed: List[S3Object],
+        window_start: datetime.datetime,
+    ) -> None:
+        self.state = state
+        self.last_modified = {obj.key: obj.last_modified for obj in listed}
+        self.bookmark = self._read_bookmark(state)
+        window = state.get(WINDOW_STATE_KEY)
+        if not isinstance(window, dict):
+            # State written before the window existed: its bookmark may be
+            # past objects that arrived late. Lower it once to the window
+            # start, so this run reads them.
+            if self.bookmark is not None and self.bookmark > window_start:
+                self.bookmark = window_start
+                self._store_bookmark(window_start)
+            window = {}
+        self.window: Dict[str, str] = window
+        state[WINDOW_STATE_KEY] = window
+
+    @staticmethod
+    def _read_bookmark(state: dict) -> Optional[datetime.datetime]:
+        if state.get("replication_key") not in (None, LAST_MODIFIED_COLUMN):
+            return None
+        value = state.get("replication_key_value")
+        return parse_timestamp(value) if value else None
+
+    def _store_bookmark(self, bookmark: datetime.datetime) -> None:
+        self.state["replication_key"] = LAST_MODIFIED_COLUMN
+        self.state["replication_key_value"] = bookmark.isoformat()
+
+    def already_read(self, obj: S3Object) -> bool:
+        """True when the object is at or before the bookmark, or in the window."""
+        if self.bookmark is not None and obj.last_modified <= self.bookmark:
+            return True
+        return self.window.get(obj.key) == obj.etag
+
+    def raise_bookmark(self, bookmark: datetime.datetime) -> None:
+        """Move the bookmark forward. It never moves back."""
+        if self.bookmark is None or bookmark > self.bookmark:
+            self.bookmark = bookmark
+            self._store_bookmark(bookmark)
+
+    def finish(self, obj: S3Object, bookmark: Optional[datetime.datetime]) -> None:
+        """Record a finished object, and move the bookmark if one is given."""
+        self.window[obj.key] = obj.etag
+        if bookmark is not None:
+            self.raise_bookmark(bookmark)
+
+    def prune(self) -> None:
+        """Drop window entries the bookmark filter already covers.
+
+        Pruning uses the LastModified values from this run's listing. An entry
+        for a key that is no longer listed is dropped too.
+        """
+        if self.bookmark is None:
+            return
+        stale = [
+            key
+            for key in self.window
+            if key not in self.last_modified or self.last_modified[key] <= self.bookmark
+        ]
+        for key in stale:
+            del self.window[key]

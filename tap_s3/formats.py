@@ -258,7 +258,9 @@ def _read_json(source: ObjectSource) -> Iterator[Dict[str, Any]]:
     """Stream the records of a JSON document with ijson.
 
     The document is an array of objects, or an object with one field that
-    holds an array of objects. Other fields on the wrapper are ignored.
+    holds an array whose every item is an object. For an object, a first pass
+    reads the whole structure without building values, so the field is
+    known before any row is yielded. A second pass streams that field.
     """
     with source.open() as raw:
         skip_bom(raw)
@@ -266,12 +268,64 @@ def _read_json(source: ObjectSource) -> Iterator[Dict[str, Any]]:
         _, event, _ = next(events)
         if event == "start_array":
             yield from _array_objects(events, "the array")
-        elif event == "start_map":
-            yield from _wrapped_objects(events)
-        else:
+            # Reading to the end makes ijson reject trailing content.
+            collections.deque(events, maxlen=0)
+            return
+        if event != "start_map":
             raise ValueError("the JSON document is not an array or an object")
-        # Reading to the end makes ijson reject trailing content.
-        collections.deque(events, maxlen=0)
+        field = _record_field(events)
+    if field is None:
+        return
+    with source.open() as raw:
+        skip_bom(raw)
+        events = iter(ijson.parse(raw, use_float=True))
+        next(events)
+        for _, event, name in events:
+            if event == "end_map":
+                break
+            _, event, _ = next(events)
+            if name == field and event == "start_array":
+                yield from _array_objects(events, f"field {name!r}")
+                field = None
+            else:
+                _skip(event, events)
+
+
+def _record_field(events: Iterator[Tuple[str, str, Any]]) -> Optional[str]:
+    """Find the one field of a wrapper object that holds the records.
+
+    Only an array whose every item is an object counts. Returns None when
+    the only such array is empty. Reads to the end of the document.
+    """
+    arrays: List[str] = []
+    filled: List[str] = []
+    for _, event, name in events:
+        if event == "end_map":
+            break
+        _, event, _ = next(events)
+        if event != "start_array":
+            _skip(event, events)
+            continue
+        count = 0
+        objects_only = True
+        for _, event, _ in events:
+            if event == "end_array":
+                break
+            count += 1
+            objects_only = objects_only and event == "start_map"
+            _skip(event, events)
+        if objects_only:
+            arrays.append(name)
+            if count:
+                filled.append(name)
+    collections.deque(events, maxlen=0)
+    if len(filled) > 1:
+        raise ValueError(f"the JSON object has more than one array of objects: {filled}")
+    if filled:
+        return filled[0]
+    if len(arrays) == 1:
+        return None
+    raise ValueError("the JSON object has no single field that holds an array of objects")
 
 
 def _build(event: str, value: Any, events: Iterator[Tuple[str, str, Any]]) -> Any:
@@ -311,38 +365,6 @@ def _array_objects(
         if event != "start_map":
             raise ValueError(f"item {index} of {label} is not a JSON object")
         yield _build(event, value, events)
-
-
-def _wrapped_objects(events: Iterator[Tuple[str, str, Any]]) -> Iterator[Dict[str, Any]]:
-    """Yield the objects of the one field that holds an array of objects."""
-    filled: List[str] = []
-    arrays = 0
-    for _, event, name in events:
-        if event == "end_map":
-            break
-        _, event, value = next(events)
-        if event != "start_array":
-            _skip(event, events)
-            continue
-        _, event, value = next(events)
-        if event == "end_array":
-            arrays += 1
-            continue
-        if event != "start_map":
-            _skip(event, events)
-            for _, event, _ in events:
-                if event == "end_array":
-                    break
-                _skip(event, events)
-            continue
-        arrays += 1
-        filled.append(name)
-        if len(filled) > 1:
-            raise ValueError(f"the JSON object has more than one array of objects: {filled}")
-        yield _build(event, value, events)
-        yield from _array_objects(events, f"field {name!r}", index=1)
-    if not filled and arrays != 1:
-        raise ValueError("the JSON object has no single field that holds an array of objects")
 
 
 def _read_jsonl(source: ObjectSource) -> Iterator[Dict[str, Any]]:

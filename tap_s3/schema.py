@@ -395,6 +395,9 @@ class RecordConverter:
                 record[name] = converter(value)
             except ValueConversionError as err:
                 raise ValueConversionError(f"column {name!r}: {err}") from None
+            if is_not_finite(record[name]):
+                # Text such as 1e400 overflows to infinity when parsed.
+                record[name] = None
         for name in self.converters:
             record.setdefault(name, None)
         return ConvertedRow(record, dropped)
