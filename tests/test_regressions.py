@@ -182,7 +182,7 @@ def test_jsonl_nan_and_infinity_become_null(bucket):
     )
     stream_records = records(sync(), "scores")
     assert [r["score"] for r in stream_records] == [1.5, None, None]
-    assert [r["extra"] for r in stream_records] == [{"v": None}, {"v": 1}, {"v": None}]
+    assert [r["extra__v"] for r in stream_records] == [None, 1, None]
 
 
 def test_parquet_nan_becomes_null(bucket):
@@ -195,7 +195,7 @@ def test_parquet_nan_becomes_null(bucket):
     bucket.put("scores.parquet", parquet_bytes(table))
     stream_records = records(sync(), "scores")
     assert [r["score"] for r in stream_records] == [1.5, None, None]
-    assert [r["nested"] for r in stream_records] == [[None], [1.0], []]
+    assert [r["nested"] for r in stream_records] == ["[null]", "[1.0]", None]
 
 
 # Finding 4: Hotglue can send incremental_mode as a string.
@@ -349,7 +349,7 @@ def test_naive_parquet_timestamps_are_utc(bucket):
     bucket.put("events.parquet", parquet_bytes(table))
     record = records(sync(), "events")[0]
     assert record["at"] == "2026-09-01T10:00:00+00:00"
-    assert record["nested"] == {"at": "2026-09-01T10:00:00+00:00"}
+    assert record["nested__at"] == "2026-09-01T10:00:00+00:00"
 
 
 # Finding 9: two raw names sanitize to the same stream.
@@ -389,15 +389,15 @@ def test_source_columns_named_like_metadata_are_renamed(bucket, tap_logs):
     bucket.put("files.csv", "_s3_key,_row_number,name\nsource-key,99,Ada\n")
     catalog = discover()
     properties = schemas(catalog)["files"]
-    assert "_s3_key_source" in properties
-    assert "_row_number_source" in properties
+    assert "_x5f_s3_key" in properties
+    assert "_x5f_row_number" in properties
     assert properties["_row_number"] == {"type": ["integer"]}
     record = records(sync(select_all(catalog)), "files")[0]
     assert record["_s3_key"] == "files.csv"
     assert record["_row_number"] == 1
-    assert record["_s3_key_source"] == "source-key"
-    assert record["_row_number_source"] == "99"
-    warnings = [m for m in tap_logs if "_s3_key_source" in m]
+    assert record["_x5f_s3_key"] == "source-key"
+    assert record["_x5f_row_number"] == "99"
+    warnings = [m for m in tap_logs if "_s3_key to _x5f_s3_key" in m]
     assert warnings, tap_logs
 
 
@@ -405,7 +405,7 @@ def test_parquet_columns_named_like_metadata_are_renamed(bucket):
     table = pa.table({"_s3_last_modified": ["yesterday"], "id": [1]})
     bucket.put("files.parquet", parquet_bytes(table))
     record = records(sync(), "files")[0]
-    assert record["_s3_last_modified_source"] == "yesterday"
+    assert record["_x5f_s3_last_modified"] == "yesterday"
     assert record["_s3_last_modified"].endswith("+00:00")
 
 

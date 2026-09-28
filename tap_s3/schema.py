@@ -105,10 +105,11 @@ def json_value_type(value: Any) -> str:
 
 
 def arrow_type(data_type: "pa.DataType") -> str:
-    """Map a Parquet column's Arrow type to a column type."""
+    """Map a scalar Parquet column's Arrow type to a column type.
+
+    `tap_s3.nested` handles dictionary, struct, list and map types first.
+    """
     types = pa.types
-    if types.is_dictionary(data_type):
-        return arrow_type(data_type.value_type)
     if types.is_boolean(data_type):
         return BOOLEAN
     if types.is_integer(data_type):
@@ -119,14 +120,6 @@ def arrow_type(data_type: "pa.DataType") -> str:
         return DATE_TIME
     if types.is_date(data_type):
         return DATE
-    if types.is_struct(data_type) or types.is_map(data_type):
-        return OBJECT
-    if (
-        types.is_list(data_type)
-        or types.is_large_list(data_type)
-        or types.is_fixed_size_list(data_type)
-    ):
-        return ARRAY
     return STRING
 
 
@@ -180,11 +173,6 @@ class ColumnTypes:
         """Record a row from a JSON or JSONL file."""
         for name, value in row.items():
             self.observe(name, json_value_type(value))
-
-    def observe_arrow_schema(self, schema: "pa.Schema") -> None:
-        """Record the columns of a Parquet file."""
-        for field in schema:
-            self.observe(field.name, arrow_type(field.type))
 
     def properties(self) -> Dict[str, dict]:
         """Build nullable JSON schema properties for the collected columns."""
@@ -384,7 +372,10 @@ class RecordConverter:
         for name, value in row.items():
             converter = self.converters.get(name)
             if converter is None:
-                dropped.append(name)
+                # A null in an unknown column carries no data, such as a null
+                # object whose fields became columns. Only report real values.
+                if value is not None:
+                    dropped.append(name)
                 continue
             if (
                 value is None
