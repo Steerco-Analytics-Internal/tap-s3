@@ -89,13 +89,16 @@ The tap picks the format from the extension. Each format also works with a
 |---|---|
 | `.csv`, `.tsv`, `.txt` | Delimited text. The tap detects `,`, tab, `;` or `\|` from the first 16 KiB. |
 | `.json` | An array of objects, or an object with one field that holds an array of objects. The tap streams it with ijson. |
+| `.jsonl`, `.ndjson` | One JSON object per line. The tap skips blank lines. |
+| `.parquet` | Parquet. The tap reads it by row group with ranged GET requests. |
 
 For a `.json` object, only a field whose every item is an object counts. The
 tap reads the whole structure once before it yields any row. So a file with
 two such fields fails at discovery, even when the rows come first. A second
 pass then streams the chosen field.
-| `.jsonl`, `.ndjson` | One JSON object per line. The tap skips blank lines. |
-| `.parquet` | Parquet. The tap reads it by row group with ranged GET requests. |
+
+JSON, JSONL and Parquet data can be nested at any depth. See
+[Nested data](#nested-data).
 
 Delimited files:
 
@@ -131,7 +134,8 @@ only when every non-empty sampled value has that type. Otherwise it is
 - A JSON string can only become `date-time`, and only in ISO 8601, such as
   `2026-09-01` or `2026-09-01T12:30:00Z`. The JSON string `"42"` stays a
   string, and so does `"09/01/2026"`.
-- Nested JSON values become `object` or `array`, with no fixed schema.
+- Nested objects and lists are taken apart into columns and child streams.
+  See [Nested data](#nested-data).
 - When files of different formats share a stream, a column with different
   types across them becomes `string`. For example, a column that is text in a
   CSV file and an integer in a JSONL file is `string`.
@@ -151,6 +155,97 @@ Every data column is nullable. Every record also carries these columns:
 The primary key is `_s3_key` and `_row_number`. The replication key is
 `_s3_last_modified`. A source column with one of these names is renamed to
 `<name>_source`, such as `_s3_key_source`, and the tap logs a warning.
+
+## Nested data
+
+Version 1.1.0 takes nested JSON, JSONL and Parquet data apart into tables,
+so a file can have any shape. Delimited files don't change. A file with no
+nested objects or lists gives the same catalog and records as version 1.0.0.
+
+### Nested objects become columns
+
+The tap joins the path to each nested value with `__`. For example,
+`valueRealization.grossSales` becomes the column
+`valueRealization__grossSales`, and `licenseUtilization.storage.used`
+becomes `licenseUtilization__storage__used`.
+
+- The tap sanitizes each part of a joined name like a stream name. A key at
+  the top level of a row keeps its own name.
+- A joined name that is already taken gets a suffix, such as `a__b_2`, and
+  the tap logs a warning. Keys at the top level of a row keep their names,
+  and the tap resolves clashes within each row.
+- Nesting stops at 10 levels, counting objects and lists. A deeper object or
+  list stays whole, as JSON text in one column.
+- A null or empty object adds no columns. Its fields are null in that row.
+
+Parquet struct columns follow the same rules.
+
+### Lists of objects become child streams
+
+A list whose items are all objects becomes a child stream, with one row per
+item. The child stream's name is the parent stream's name, then `__`, then
+the list's path joined with `__`. For example, the list
+`valueRealization.adjustments` in stream `customers_nested` becomes the
+stream `customers_nested__valueRealization__adjustments`.
+
+- The tap takes each item apart by the same rules. A list inside an item
+  becomes a grandchild stream, and so on.
+- An empty list adds no rows. A null item in a list is skipped, and the
+  other items keep their positions.
+- A Parquet list of structs follows the same rules.
+
+Each child row carries these columns:
+
+| Column | Type | Description |
+|---|---|---|
+| `_parent__<key>` | nullable | Each top-level plain value of the parent row, such as `_parent__domain`. A plain value is neither an object nor a list. |
+| `_parent_row` | string | The parent row's key. For a top-level parent, that is `<_s3_key>#<_row_number>`. For a deeper parent, it is the parent's `_row_key`. |
+| `_index` | integer | The item's position in the list, starting at 0. |
+| `_row_key` | string | This row's key, such as `<parent key>/valueRealization__adjustments#0`. |
+| `_s3_key` | string | The object key. |
+| `_s3_last_modified` | date-time | The object's LastModified value, in UTC. |
+
+The primary key of a child stream is `_s3_key` and `_row_key`. The
+replication key is `_s3_last_modified`. A column in an item that has one of
+these names gets a `_source` suffix.
+
+### Other lists become JSON text
+
+A list of plain values, such as tags, becomes one text column that holds the
+JSON, such as `["a", "b"]`. So does a list that mixes objects with other
+values, and a list of lists. A Parquet list of plain values and a Parquet map
+become JSON text too.
+
+### Discovery and sync with child streams
+
+- Discovery finds child streams in the same sample it takes for the parent.
+  A child stream's schema is the union across the sampled rows and files.
+- Child streams are ordinary streams in the catalog. Select them, or leave
+  them out, like any other stream. A child stream can be selected while its
+  parent is not.
+- A sync reads each object once, and routes its rows to every selected
+  stream. It holds one record at a time, never a whole file.
+- Each stream keeps its own bookmark and window. An object counts as done for
+  a stream only after the tap emits its rows for every selected stream. A
+  child stream selected later reads the older objects for itself, and the
+  other streams don't read them again.
+- A child stream in the catalog that the bucket no longer has is skipped with
+  a warning. A child stream that appears after discovery is ignored until you
+  run discovery again.
+
+### Change from version 1.0.0
+
+Version 1.0.0 typed a nested object as an `object` column, and a list as an
+`array` column. Version 1.1.0 takes them apart as described above. A catalog
+saved on version 1.0.0 for nested data still syncs:
+
+- An `object` column, and an `array` column for a list of objects, stay null.
+- An `array` column for any other list keeps its values.
+- The new columns and child streams are missing, and the tap logs one warning
+  per stream for the columns it drops.
+
+To get the new columns and child streams, run discovery again and save the
+catalog.
 
 ## Sync
 
