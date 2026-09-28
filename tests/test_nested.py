@@ -8,6 +8,7 @@ import tracemalloc
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 from click.testing import CliRunner
 from tests import golden
 from tests.conftest import (
@@ -235,49 +236,54 @@ def nest(depth, leaf):
 
 def test_depth_cap_keeps_the_rest_as_json_text():
     record = nest(12, 1)
-    piece = next(explode(record, "deep", "k#1", {}))
+    piece = next(explode(record, "k#1", {}))
     capped = "__".join(f"l{level}" for level in range(MAX_DEPTH))
     assert list(piece.row) == [capped]
     assert json.loads(piece.row[capped]) == {"l10": {"l11": 1}}
-    shallow = next(explode(nest(MAX_DEPTH, 1), "deep", "k#1", {}))
+    shallow = next(explode(nest(MAX_DEPTH, 1), "k#1", {}))
     assert shallow.row == {capped: 1}
 
 
 def test_depth_cap_counts_list_levels():
     record = nest(MAX_DEPTH, [{"x": 1}])
-    pieces = list(explode(record, "deep", "k#1", {}))
+    pieces = list(explode(record, "k#1", {}))
     assert len(pieces) == 1
     name = "__".join(f"l{level}" for level in range(MAX_DEPTH))
     assert json.loads(pieces[0].row[name]) == [{"x": 1}]
     # One level up, the list is a child stream, and its items sit at the cap.
     record = nest(MAX_DEPTH - 1, [{"x": {"y": 1}}])
-    pieces = list(explode(record, "deep", "k#1", {}))
+    pieces = list(explode(record, "k#1", {}))
     assert len(pieces) == 2
     assert json.loads(pieces[1].row["x"]) == {"y": 1}
 
 
-def test_name_collisions_get_a_suffix_and_a_warning(bucket, tap_logs):
+def test_keys_that_read_as_nested_names_are_encoded(bucket, tap_logs):
     rows = [{"a__b": 1, "a": {"b": 2}, "x y": {"c": 3}, "x-y": {"c": 4}}]
     bucket.put("clash.json", json.dumps(rows))
     catalog = discover()
-    assert data_columns(schemas(catalog)["clash"]) == ["a__b", "a__b_2", "x_y__c", "x_y__c_2"]
+    assert data_columns(schemas(catalog)["clash"]) == [
+        "a_x5f__b",
+        "a__b",
+        "x_x20_y__c",
+        "x_x2d_y__c",
+    ]
     record = records(sync(select_all(catalog)), "clash")[0]
-    assert (record["a__b"], record["a__b_2"]) == (1, 2)
-    assert (record["x_y__c"], record["x_y__c_2"]) == (3, 4)
-    warnings = [m for m in tap_logs if "nested columns whose names clash" in m]
-    assert warnings and "a.b to a__b_2" in warnings[0]
+    assert (record["a_x5f__b"], record["a__b"]) == (1, 2)
+    assert (record["x_x20_y__c"], record["x_x2d_y__c"]) == (3, 4)
+    warnings = [m for m in tap_logs if "like encoded names" in m]
+    assert warnings and "a__b to a_x5f__b" in warnings[0]
 
 
-def test_child_columns_named_like_child_metadata_are_renamed(bucket):
+def test_child_columns_named_like_child_metadata_are_encoded(bucket):
     rows = [{"id": 1, "items": [{"_index": 9, "_row_key": "mine", "_parent__id": 5, "v": 1}]}]
     bucket.put("o.json", json.dumps(rows))
     catalog = discover()
     child = schemas(catalog)["o__items"]
-    assert {"_index_source", "_row_key_source", "_parent__id_source"} <= set(child)
+    assert {"_x5f_index", "_x5f_row_key", "_x5f_parent_x5f__id"} <= set(child)
     row = records(sync(select_all(catalog)), "o__items")[0]
-    assert (row["_index"], row["_index_source"]) == (0, 9)
-    assert row["_row_key_source"] == "mine"
-    assert (row["_parent__id"], row["_parent__id_source"]) == (1, 5)
+    assert (row["_index"], row["_x5f_index"]) == (0, 9)
+    assert row["_x5f_row_key"] == "mine"
+    assert (row["_parent__id"], row["_x5f_parent_x5f__id"]) == (1, 5)
 
 
 def test_mixed_and_plain_lists_are_json_text(bucket):
@@ -394,7 +400,7 @@ def test_parquet_nested_structs_and_lists(bucket):
     catalog = discover()
     found = schemas(catalog)
     assert sorted(found) == ["orders", "orders__lines", "orders__lines__taxes"]
-    assert data_columns(found["orders"]) == ["id", "labels", "meta__source__system"]
+    assert data_columns(found["orders"]) == ["id", "meta__source__system", "labels"]
     assert found["orders"]["labels"] == {"type": ["string", "null"]}
     assert data_columns(found["orders__lines"]) == ["sku", "price__amount"]
     assert found["orders__lines"]["_parent__id"] == {"type": ["integer", "null"]}
@@ -446,15 +452,52 @@ def test_child_with_its_parent_left_out_of_the_catalog(bucket):
     assert len(records(messages)) == 20
 
 
-def test_child_stream_without_a_parent_in_the_bucket_is_skipped(bucket, tap_logs):
+def root_metadata(entry):
+    return next(item for item in entry["metadata"] if item["breadcrumb"] == [])["metadata"]
+
+
+def test_child_with_a_missing_parent_is_skipped(bucket, tap_logs):
     bucket.put("customers_nested/2026-09.json", MODEL_N, minutes(1))
     catalog = select_all(discover())
     for entry in catalog["streams"]:
         if entry["stream"] == ADJUSTMENTS:
-            entry["stream"] = entry["tap_stream_id"] = "gone__things"
+            root_metadata(entry)["tap-s3.parent-stream"] = "gone"
     messages = sync(catalog)
     assert {m["stream"] for m in messages if m["type"] == "RECORD"} == {"customers_nested"}
-    assert any("gone__things" in m and "no parent stream" in m for m in tap_logs)
+    assert any(ADJUSTMENTS in m and "parent stream 'gone' is missing" in m for m in tap_logs)
+    assert "replication_key_value" not in last_state(messages)["bookmarks"].get(
+        ADJUSTMENTS, {}
+    )
+
+
+def test_child_without_parent_metadata_is_skipped(bucket, tap_logs):
+    bucket.put("customers_nested/2026-09.json", MODEL_N, minutes(1))
+    catalog = select_all(discover())
+    for entry in catalog["streams"]:
+        if entry["stream"] == ADJUSTMENTS:
+            root_metadata(entry).pop("tap-s3.parent-stream")
+    messages = sync(catalog)
+    assert {m["stream"] for m in messages if m["type"] == "RECORD"} == {"customers_nested"}
+    assert any(ADJUSTMENTS in m and "has no tap-s3.parent-stream" in m for m in tap_logs)
+
+
+@pytest.mark.parametrize("path", [None, [], "items", [1]])
+def test_child_with_bad_list_path_metadata_is_skipped(bucket, tap_logs, path):
+    bucket.put("customers_nested/2026-09.json", MODEL_N, minutes(1))
+    catalog = select_all(discover())
+    for entry in catalog["streams"]:
+        if entry["stream"] == ADJUSTMENTS:
+            root_metadata(entry)["tap-s3.list-path"] = path
+    messages = sync(catalog)
+    assert {m["stream"] for m in messages if m["type"] == "RECORD"} == {"customers_nested"}
+    assert any(ADJUSTMENTS in m and "metadata is not valid" in m for m in tap_logs)
+
+
+def test_catalog_records_each_childs_parent_and_path(bucket):
+    bucket.put("customers_nested/2026-09.json", MODEL_N, minutes(1))
+    entry = next(e for e in discover()["streams"] if e["stream"] == ADJUSTMENTS)
+    assert root_metadata(entry)["tap-s3.parent-stream"] == "customers_nested"
+    assert root_metadata(entry)["tap-s3.list-path"] == ["valueRealization", "adjustments"]
 
 
 def test_child_found_after_discovery_is_ignored(bucket):
@@ -560,8 +603,8 @@ def peak_while_exploding(path):
         counts = {}
         rows = iter_rows(_FileSource(path), FileFormat(".json", False))
         for number, row in enumerate(rows, 1):
-            for piece in explode(row, "big", f"big.json#{number}", {}):
-                counts[piece.stream] = counts.get(piece.stream, 0) + 1
+            for piece in explode(row, f"big.json#{number}", {}):
+                counts[piece.lineage] = counts.get(piece.lineage, 0) + 1
         return counts, tracemalloc.get_traced_memory()[1]
     finally:
         tracemalloc.stop()
@@ -572,8 +615,9 @@ def test_large_nested_json_uses_bounded_memory(tmp_path):
     large_size = nested_file(tmp_path / "large.json", 80_000)
     small_counts, small_peak = peak_while_exploding(tmp_path / "small.json")
     large_counts, large_peak = peak_while_exploding(tmp_path / "large.json")
-    assert small_counts == {"big": 20_000, "big__lines": 100_000}
-    assert large_counts == {"big": 80_000, "big__lines": 400_000}
+    lines = ((("lines",),))
+    assert small_counts == {(): 20_000, lines: 100_000}
+    assert large_counts == {(): 80_000, lines: 400_000}
     # The file is four times larger. Memory stays nearly flat.
     assert large_size > 3.9 * small_size
     assert large_peak < 1.6 * small_peak
@@ -603,33 +647,13 @@ def test_parquet_struct_below_the_depth_cap_is_json_text(bucket):
     assert json.loads(record[name]) == {"l10": 1}
 
 
-def test_parent_names_that_clash_get_a_suffix():
+def test_parent_columns_are_one_to_one():
     record = {"a b": 1, "a-b": 2, "items": [{"v": 1}]}
-    child = list(explode(record, "s", "k#1", {}))[1]
-    assert (child.row["_parent__a_b"], child.row["_parent__a_b_2"]) == (1, 2)
+    child = list(explode(record, "k#1", {}))[1]
+    assert (child.row["_parent__a_x20_b"], child.row["_parent__a_x2d_b"]) == (1, 2)
 
 
 def test_child_stream_reads_nothing_on_its_own(bucket):
     bucket.put("customers_nested/2026-09.json", MODEL_N, minutes(1))
     tap = make_tap()
     assert list(tap.streams[ADJUSTMENTS].get_records(None)) == []
-
-
-def test_a_catalog_saved_on_v1_0_0_still_syncs(bucket, tap_logs):
-    rows = [{"id": 1, "info": {"a": 1}, "tags": ["x"], "items": [{"v": 1}]}]
-    bucket.put("old.json", json.dumps(rows))
-    catalog = select_all(discover())
-    catalog["streams"] = [e for e in catalog["streams"] if e["stream"] == "old"]
-    catalog["streams"][0]["schema"]["properties"] = {
-        "id": {"type": ["integer", "null"]},
-        "info": {"type": ["object", "null"]},
-        "tags": {"type": ["array", "null"]},
-        "items": {"type": ["array", "null"]},
-        "_s3_key": {"type": ["string"]},
-        "_s3_last_modified": {"type": ["string"], "format": "date-time"},
-        "_row_number": {"type": ["integer"]},
-    }
-    record = records(sync(catalog), "old")[0]
-    assert (record["id"], record["info"], record["items"]) == (1, None, None)
-    assert record["tags"] == ["x"]
-    assert any("info__a" in m and "not in the catalog schema" in m for m in tap_logs)

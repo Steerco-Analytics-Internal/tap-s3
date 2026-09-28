@@ -389,15 +389,15 @@ def test_source_columns_named_like_metadata_are_renamed(bucket, tap_logs):
     bucket.put("files.csv", "_s3_key,_row_number,name\nsource-key,99,Ada\n")
     catalog = discover()
     properties = schemas(catalog)["files"]
-    assert "_s3_key_source" in properties
-    assert "_row_number_source" in properties
+    assert "_x5f_s3_key" in properties
+    assert "_x5f_row_number" in properties
     assert properties["_row_number"] == {"type": ["integer"]}
     record = records(sync(select_all(catalog)), "files")[0]
     assert record["_s3_key"] == "files.csv"
     assert record["_row_number"] == 1
-    assert record["_s3_key_source"] == "source-key"
-    assert record["_row_number_source"] == "99"
-    warnings = [m for m in tap_logs if "_s3_key_source" in m]
+    assert record["_x5f_s3_key"] == "source-key"
+    assert record["_x5f_row_number"] == "99"
+    warnings = [m for m in tap_logs if "_s3_key to _x5f_s3_key" in m]
     assert warnings, tap_logs
 
 
@@ -405,7 +405,7 @@ def test_parquet_columns_named_like_metadata_are_renamed(bucket):
     table = pa.table({"_s3_last_modified": ["yesterday"], "id": [1]})
     bucket.put("files.parquet", parquet_bytes(table))
     record = records(sync(), "files")[0]
-    assert record["_s3_last_modified_source"] == "yesterday"
+    assert record["_x5f_s3_last_modified"] == "yesterday"
     assert record["_s3_last_modified"].endswith("+00:00")
 
 
