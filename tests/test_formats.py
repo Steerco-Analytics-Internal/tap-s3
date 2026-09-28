@@ -341,11 +341,11 @@ def test_parquet_with_typed_and_nested_columns(bucket):
         "created": "string",
         "birthday": "string",
         "blob": "string",
-        "address": "object",
-        "tags": "array",
-        "attrs": "object",
+        "address__city": "string",
+        "address__zip": "string",
+        "tags": "string",
+        "attrs": "string",
         "at_time": "string",
-        "events": "array",
         "_s3_key": "string",
         "_s3_last_modified": "string",
         "_row_number": "integer",
@@ -363,14 +363,29 @@ def test_parquet_with_typed_and_nested_columns(bucket):
         "created": "2026-09-01T12:00:00+00:00",
         "birthday": "1815-12-10",
         "blob": "AAE=",
-        "address": {"city": "London", "zip": "N1"},
-        "tags": ["a", "b"],
-        "attrs": {"k": 1},
+        "address__city": "London",
+        "address__zip": "N1",
+        "tags": '["a", "b"]',
+        "attrs": '{"k": 1}',
         "at_time": "09:30:00",
-        "events": [{"at": "2026-01-01T00:00:00+00:00"}],
     }
-    assert rows[1]["small"] is None and rows[1]["address"] is None
-    assert rows[1]["tags"] == []
+    assert rows[1]["small"] is None and rows[1]["address__city"] is None
+    assert rows[1]["tags"] is None
+
+
+def test_parquet_list_of_structs_is_a_child_stream(bucket):
+    bucket.put("typed.parquet", as_parquet(typed_parquet_table()))
+    catalog = discover()
+    assert [entry["stream"] for entry in catalog["streams"]] == ["typed", "typed__events"]
+    events = schemas(catalog)["typed__events"]
+    assert events["at"] == {"type": ["string", "null"], "format": "date-time"}
+    assert events["_parent__id"] == {"type": ["integer", "null"]}
+    child = records(sync(select_all(catalog)), "typed__events")
+    assert len(child) == 1
+    assert child[0]["at"] == "2026-01-01T00:00:00+00:00"
+    assert child[0]["_parent__id"] == 1
+    assert child[0]["_parent_row"] == "typed.parquet#1"
+    assert child[0]["_row_key"] == "typed.parquet#1/events#0"
 
 
 def test_parquet_reads_by_row_group(bucket, monkeypatch):

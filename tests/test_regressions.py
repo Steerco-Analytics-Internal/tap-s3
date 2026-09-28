@@ -182,7 +182,7 @@ def test_jsonl_nan_and_infinity_become_null(bucket):
     )
     stream_records = records(sync(), "scores")
     assert [r["score"] for r in stream_records] == [1.5, None, None]
-    assert [r["extra"] for r in stream_records] == [{"v": None}, {"v": 1}, {"v": None}]
+    assert [r["extra__v"] for r in stream_records] == [None, 1, None]
 
 
 def test_parquet_nan_becomes_null(bucket):
@@ -195,7 +195,7 @@ def test_parquet_nan_becomes_null(bucket):
     bucket.put("scores.parquet", parquet_bytes(table))
     stream_records = records(sync(), "scores")
     assert [r["score"] for r in stream_records] == [1.5, None, None]
-    assert [r["nested"] for r in stream_records] == [[None], [1.0], []]
+    assert [r["nested"] for r in stream_records] == ["[null]", "[1.0]", None]
 
 
 # Finding 4: Hotglue can send incremental_mode as a string.
@@ -349,7 +349,7 @@ def test_naive_parquet_timestamps_are_utc(bucket):
     bucket.put("events.parquet", parquet_bytes(table))
     record = records(sync(), "events")[0]
     assert record["at"] == "2026-09-01T10:00:00+00:00"
-    assert record["nested"] == {"at": "2026-09-01T10:00:00+00:00"}
+    assert record["nested__at"] == "2026-09-01T10:00:00+00:00"
 
 
 # Finding 9: two raw names sanitize to the same stream.

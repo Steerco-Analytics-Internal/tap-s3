@@ -1,0 +1,1121 @@
+{
+ "catalog": {
+  "streams": [
+   {
+    "key_properties": [
+     "_s3_key",
+     "_row_number"
+    ],
+    "metadata": [
+     {
+      "breadcrumb": [
+       "properties",
+       "id"
+      ],
+      "metadata": {
+       "inclusion": "available"
+      }
+     },
+     {
+      "breadcrumb": [
+       "properties",
+       "name"
+      ],
+      "metadata": {
+       "inclusion": "available"
+      }
+     },
+     {
+      "breadcrumb": [
+       "properties",
+       "score"
+      ],
+      "metadata": {
+       "inclusion": "available"
+      }
+     },
+     {
+      "breadcrumb": [
+       "properties",
+       "active"
+      ],
+      "metadata": {
+       "inclusion": "available"
+      }
+     },
+     {
+      "breadcrumb": [
+       "properties",
+       "joined"
+      ],
+      "metadata": {
+       "inclusion": "available"
+      }
+     },
+     {
+      "breadcrumb": [
+       "properties",
+       "note"
+      ],
+      "metadata": {
+       "inclusion": "available"
+      }
+     },
+     {
+      "breadcrumb": [
+       "properties",
+       "code"
+      ],
+      "metadata": {
+       "inclusion": "available"
+      }
+     },
+     {
+      "breadcrumb": [
+       "properties",
+       "_s3_key"
+      ],
+      "metadata": {
+       "inclusion": "automatic"
+      }
+     },
+     {
+      "breadcrumb": [
+       "properties",
+       "_s3_last_modified"
+      ],
+      "metadata": {
+       "inclusion": "automatic"
+      }
+     },
+     {
+      "breadcrumb": [
+       "properties",
+       "_row_number"
+      ],
+      "metadata": {
+       "inclusion": "automatic"
+      }
+     },
+     {
+      "breadcrumb": [],
+      "metadata": {
+       "inclusion": "available",
+       "selected": true,
+       "selected-by-default": true,
+       "table-key-properties": [
+        "_s3_key",
+        "_row_number"
+       ],
+       "valid-replication-keys": [
+        "_s3_last_modified"
+       ]
+      }
+     }
+    ],
+    "replication_key": "_s3_last_modified",
+    "replication_method": "INCREMENTAL",
+    "schema": {
+     "properties": {
+      "_row_number": {
+       "type": [
+        "integer"
+       ]
+      },
+      "_s3_key": {
+       "type": [
+        "string"
+       ]
+      },
+      "_s3_last_modified": {
+       "format": "date-time",
+       "type": [
+        "string"
+       ]
+      },
+      "active": {
+       "type": [
+        "boolean",
+        "null"
+       ]
+      },
+      "code": {
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "id": {
+       "type": [
+        "integer",
+        "null"
+       ]
+      },
+      "joined": {
+       "format": "date-time",
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "name": {
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "note": {
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "score": {
+       "type": [
+        "number",
+        "null"
+       ]
+      }
+     },
+     "type": "object"
+    },
+    "stream": "flat",
+    "tap_stream_id": "flat"
+   },
+   {
+    "key_properties": [
+     "_s3_key",
+     "_row_number"
+    ],
+    "metadata": [
+     {
+      "breadcrumb": [
+       "properties",
+       "id"
+      ],
+      "metadata": {
+       "inclusion": "available"
+      }
+     },
+     {
+      "breadcrumb": [
+       "properties",
+       "name"
+      ],
+      "metadata": {
+       "inclusion": "available"
+      }
+     },
+     {
+      "breadcrumb": [
+       "properties",
+       "score"
+      ],
+      "metadata": {
+       "inclusion": "available"
+      }
+     },
+     {
+      "breadcrumb": [
+       "properties",
+       "active"
+      ],
+      "metadata": {
+       "inclusion": "available"
+      }
+     },
+     {
+      "breadcrumb": [
+       "properties",
+       "joined"
+      ],
+      "metadata": {
+       "inclusion": "available"
+      }
+     },
+     {
+      "breadcrumb": [
+       "properties",
+       "note"
+      ],
+      "metadata": {
+       "inclusion": "available"
+      }
+     },
+     {
+      "breadcrumb": [
+       "properties",
+       "code"
+      ],
+      "metadata": {
+       "inclusion": "available"
+      }
+     },
+     {
+      "breadcrumb": [
+       "properties",
+       "_s3_key"
+      ],
+      "metadata": {
+       "inclusion": "automatic"
+      }
+     },
+     {
+      "breadcrumb": [
+       "properties",
+       "_s3_last_modified"
+      ],
+      "metadata": {
+       "inclusion": "automatic"
+      }
+     },
+     {
+      "breadcrumb": [
+       "properties",
+       "_row_number"
+      ],
+      "metadata": {
+       "inclusion": "automatic"
+      }
+     },
+     {
+      "breadcrumb": [],
+      "metadata": {
+       "inclusion": "available",
+       "selected": true,
+       "selected-by-default": true,
+       "table-key-properties": [
+        "_s3_key",
+        "_row_number"
+       ],
+       "valid-replication-keys": [
+        "_s3_last_modified"
+       ]
+      }
+     }
+    ],
+    "replication_key": "_s3_last_modified",
+    "replication_method": "INCREMENTAL",
+    "schema": {
+     "properties": {
+      "_row_number": {
+       "type": [
+        "integer"
+       ]
+      },
+      "_s3_key": {
+       "type": [
+        "string"
+       ]
+      },
+      "_s3_last_modified": {
+       "format": "date-time",
+       "type": [
+        "string"
+       ]
+      },
+      "active": {
+       "type": [
+        "boolean",
+        "null"
+       ]
+      },
+      "code": {
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "id": {
+       "type": [
+        "integer",
+        "null"
+       ]
+      },
+      "joined": {
+       "format": "date-time",
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "name": {
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "note": {
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "score": {
+       "type": [
+        "number",
+        "null"
+       ]
+      }
+     },
+     "type": "object"
+    },
+    "stream": "lines",
+    "tap_stream_id": "lines"
+   },
+   {
+    "key_properties": [
+     "_s3_key",
+     "_row_number"
+    ],
+    "metadata": [
+     {
+      "breadcrumb": [
+       "properties",
+       "id"
+      ],
+      "metadata": {
+       "inclusion": "available"
+      }
+     },
+     {
+      "breadcrumb": [
+       "properties",
+       "name"
+      ],
+      "metadata": {
+       "inclusion": "available"
+      }
+     },
+     {
+      "breadcrumb": [
+       "properties",
+       "score"
+      ],
+      "metadata": {
+       "inclusion": "available"
+      }
+     },
+     {
+      "breadcrumb": [
+       "properties",
+       "_s3_key"
+      ],
+      "metadata": {
+       "inclusion": "automatic"
+      }
+     },
+     {
+      "breadcrumb": [
+       "properties",
+       "_s3_last_modified"
+      ],
+      "metadata": {
+       "inclusion": "automatic"
+      }
+     },
+     {
+      "breadcrumb": [
+       "properties",
+       "_row_number"
+      ],
+      "metadata": {
+       "inclusion": "automatic"
+      }
+     },
+     {
+      "breadcrumb": [],
+      "metadata": {
+       "inclusion": "available",
+       "selected": true,
+       "selected-by-default": true,
+       "table-key-properties": [
+        "_s3_key",
+        "_row_number"
+       ],
+       "valid-replication-keys": [
+        "_s3_last_modified"
+       ]
+      }
+     }
+    ],
+    "replication_key": "_s3_last_modified",
+    "replication_method": "INCREMENTAL",
+    "schema": {
+     "properties": {
+      "_row_number": {
+       "type": [
+        "integer"
+       ]
+      },
+      "_s3_key": {
+       "type": [
+        "string"
+       ]
+      },
+      "_s3_last_modified": {
+       "format": "date-time",
+       "type": [
+        "string"
+       ]
+      },
+      "id": {
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "name": {
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "score": {
+       "type": [
+        "string",
+        "null"
+       ]
+      }
+     },
+     "type": "object"
+    },
+    "stream": "people",
+    "tap_stream_id": "people"
+   },
+   {
+    "key_properties": [
+     "_s3_key",
+     "_row_number"
+    ],
+    "metadata": [
+     {
+      "breadcrumb": [
+       "properties",
+       "id"
+      ],
+      "metadata": {
+       "inclusion": "available"
+      }
+     },
+     {
+      "breadcrumb": [
+       "properties",
+       "score"
+      ],
+      "metadata": {
+       "inclusion": "available"
+      }
+     },
+     {
+      "breadcrumb": [
+       "properties",
+       "price"
+      ],
+      "metadata": {
+       "inclusion": "available"
+      }
+     },
+     {
+      "breadcrumb": [
+       "properties",
+       "active"
+      ],
+      "metadata": {
+       "inclusion": "available"
+      }
+     },
+     {
+      "breadcrumb": [
+       "properties",
+       "name"
+      ],
+      "metadata": {
+       "inclusion": "available"
+      }
+     },
+     {
+      "breadcrumb": [
+       "properties",
+       "at"
+      ],
+      "metadata": {
+       "inclusion": "available"
+      }
+     },
+     {
+      "breadcrumb": [
+       "properties",
+       "day"
+      ],
+      "metadata": {
+       "inclusion": "available"
+      }
+     },
+     {
+      "breadcrumb": [
+       "properties",
+       "_s3_key"
+      ],
+      "metadata": {
+       "inclusion": "automatic"
+      }
+     },
+     {
+      "breadcrumb": [
+       "properties",
+       "_s3_last_modified"
+      ],
+      "metadata": {
+       "inclusion": "automatic"
+      }
+     },
+     {
+      "breadcrumb": [
+       "properties",
+       "_row_number"
+      ],
+      "metadata": {
+       "inclusion": "automatic"
+      }
+     },
+     {
+      "breadcrumb": [],
+      "metadata": {
+       "inclusion": "available",
+       "selected": true,
+       "selected-by-default": true,
+       "table-key-properties": [
+        "_s3_key",
+        "_row_number"
+       ],
+       "valid-replication-keys": [
+        "_s3_last_modified"
+       ]
+      }
+     }
+    ],
+    "replication_key": "_s3_last_modified",
+    "replication_method": "INCREMENTAL",
+    "schema": {
+     "properties": {
+      "_row_number": {
+       "type": [
+        "integer"
+       ]
+      },
+      "_s3_key": {
+       "type": [
+        "string"
+       ]
+      },
+      "_s3_last_modified": {
+       "format": "date-time",
+       "type": [
+        "string"
+       ]
+      },
+      "active": {
+       "type": [
+        "boolean",
+        "null"
+       ]
+      },
+      "at": {
+       "format": "date-time",
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "day": {
+       "format": "date",
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "id": {
+       "type": [
+        "integer",
+        "null"
+       ]
+      },
+      "name": {
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "price": {
+       "type": [
+        "number",
+        "null"
+       ]
+      },
+      "score": {
+       "type": [
+        "number",
+        "null"
+       ]
+      }
+     },
+     "type": "object"
+    },
+    "stream": "typed",
+    "tap_stream_id": "typed"
+   }
+  ]
+ },
+ "records": [
+  {
+   "record": {
+    "_row_number": 1,
+    "_s3_key": "flat/array.json",
+    "_s3_last_modified": "2026-09-01T12:01:00+00:00",
+    "active": true,
+    "code": "007",
+    "id": 1,
+    "joined": "2026-09-01T00:00:00+00:00",
+    "name": "Ada",
+    "note": null,
+    "score": 1.5
+   },
+   "stream": "flat"
+  },
+  {
+   "record": {
+    "_row_number": 2,
+    "_s3_key": "flat/array.json",
+    "_s3_last_modified": "2026-09-01T12:01:00+00:00",
+    "active": false,
+    "code": "42",
+    "id": 2,
+    "joined": "2026-09-02T10:00:00+00:00",
+    "name": "Grace",
+    "note": "",
+    "score": 2
+   },
+   "stream": "flat"
+  },
+  {
+   "record": {
+    "_row_number": 3,
+    "_s3_key": "flat/array.json",
+    "_s3_last_modified": "2026-09-01T12:01:00+00:00",
+    "active": null,
+    "code": null,
+    "id": 3,
+    "joined": null,
+    "name": "Alan",
+    "note": "x",
+    "score": null
+   },
+   "stream": "flat"
+  },
+  {
+   "record": {
+    "_row_number": 1,
+    "_s3_key": "flat/wrapped.json",
+    "_s3_last_modified": "2026-09-01T12:02:00+00:00",
+    "active": true,
+    "code": "007",
+    "id": 1,
+    "joined": "2026-09-01T00:00:00+00:00",
+    "name": "Ada",
+    "note": null,
+    "score": 1.5
+   },
+   "stream": "flat"
+  },
+  {
+   "record": {
+    "_row_number": 2,
+    "_s3_key": "flat/wrapped.json",
+    "_s3_last_modified": "2026-09-01T12:02:00+00:00",
+    "active": false,
+    "code": "42",
+    "id": 2,
+    "joined": "2026-09-02T10:00:00+00:00",
+    "name": "Grace",
+    "note": "",
+    "score": 2
+   },
+   "stream": "flat"
+  },
+  {
+   "record": {
+    "_row_number": 3,
+    "_s3_key": "flat/wrapped.json",
+    "_s3_last_modified": "2026-09-01T12:02:00+00:00",
+    "active": null,
+    "code": null,
+    "id": 3,
+    "joined": null,
+    "name": "Alan",
+    "note": "x",
+    "score": null
+   },
+   "stream": "flat"
+  },
+  {
+   "record": {
+    "_row_number": 1,
+    "_s3_key": "lines.jsonl",
+    "_s3_last_modified": "2026-09-01T12:03:00+00:00",
+    "active": true,
+    "code": "007",
+    "id": 1,
+    "joined": "2026-09-01T00:00:00+00:00",
+    "name": "Ada",
+    "note": null,
+    "score": 1.5
+   },
+   "stream": "lines"
+  },
+  {
+   "record": {
+    "_row_number": 2,
+    "_s3_key": "lines.jsonl",
+    "_s3_last_modified": "2026-09-01T12:03:00+00:00",
+    "active": false,
+    "code": "42",
+    "id": 2,
+    "joined": "2026-09-02T10:00:00+00:00",
+    "name": "Grace",
+    "note": "",
+    "score": 2
+   },
+   "stream": "lines"
+  },
+  {
+   "record": {
+    "_row_number": 3,
+    "_s3_key": "lines.jsonl",
+    "_s3_last_modified": "2026-09-01T12:03:00+00:00",
+    "active": null,
+    "code": null,
+    "id": 3,
+    "joined": null,
+    "name": "Alan",
+    "note": "x",
+    "score": null
+   },
+   "stream": "lines"
+  },
+  {
+   "record": {
+    "_row_number": 1,
+    "_s3_key": "people.csv",
+    "_s3_last_modified": "2026-09-01T12:04:00+00:00",
+    "id": "1",
+    "name": "Ada",
+    "score": "1.5"
+   },
+   "stream": "people"
+  },
+  {
+   "record": {
+    "_row_number": 2,
+    "_s3_key": "people.csv",
+    "_s3_last_modified": "2026-09-01T12:04:00+00:00",
+    "id": "2",
+    "name": null,
+    "score": "x"
+   },
+   "stream": "people"
+  },
+  {
+   "record": {
+    "_row_number": 1,
+    "_s3_key": "typed.parquet",
+    "_s3_last_modified": "2026-09-01T12:05:00+00:00",
+    "active": true,
+    "at": "2026-09-01T12:00:00+00:00",
+    "day": "2026-09-01",
+    "id": 1,
+    "name": "Ada",
+    "price": 9.99,
+    "score": 1.5
+   },
+   "stream": "typed"
+  },
+  {
+   "record": {
+    "_row_number": 2,
+    "_s3_key": "typed.parquet",
+    "_s3_last_modified": "2026-09-01T12:05:00+00:00",
+    "active": null,
+    "at": null,
+    "day": null,
+    "id": 2,
+    "name": null,
+    "price": null,
+    "score": null
+   },
+   "stream": "typed"
+  }
+ ],
+ "schemas": [
+  {
+   "key_properties": [
+    "_s3_key",
+    "_row_number"
+   ],
+   "schema": {
+    "properties": {
+     "_row_number": {
+      "type": [
+       "integer"
+      ]
+     },
+     "_s3_key": {
+      "type": [
+       "string"
+      ]
+     },
+     "_s3_last_modified": {
+      "format": "date-time",
+      "type": [
+       "string"
+      ]
+     },
+     "active": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "code": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "id": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "joined": {
+      "format": "date-time",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "name": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "note": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "score": {
+      "type": [
+       "number",
+       "null"
+      ]
+     }
+    },
+    "type": "object"
+   },
+   "stream": "flat"
+  },
+  {
+   "key_properties": [
+    "_s3_key",
+    "_row_number"
+   ],
+   "schema": {
+    "properties": {
+     "_row_number": {
+      "type": [
+       "integer"
+      ]
+     },
+     "_s3_key": {
+      "type": [
+       "string"
+      ]
+     },
+     "_s3_last_modified": {
+      "format": "date-time",
+      "type": [
+       "string"
+      ]
+     },
+     "active": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "code": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "id": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "joined": {
+      "format": "date-time",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "name": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "note": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "score": {
+      "type": [
+       "number",
+       "null"
+      ]
+     }
+    },
+    "type": "object"
+   },
+   "stream": "lines"
+  },
+  {
+   "key_properties": [
+    "_s3_key",
+    "_row_number"
+   ],
+   "schema": {
+    "properties": {
+     "_row_number": {
+      "type": [
+       "integer"
+      ]
+     },
+     "_s3_key": {
+      "type": [
+       "string"
+      ]
+     },
+     "_s3_last_modified": {
+      "format": "date-time",
+      "type": [
+       "string"
+      ]
+     },
+     "id": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "name": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "score": {
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "type": "object"
+   },
+   "stream": "people"
+  },
+  {
+   "key_properties": [
+    "_s3_key",
+    "_row_number"
+   ],
+   "schema": {
+    "properties": {
+     "_row_number": {
+      "type": [
+       "integer"
+      ]
+     },
+     "_s3_key": {
+      "type": [
+       "string"
+      ]
+     },
+     "_s3_last_modified": {
+      "format": "date-time",
+      "type": [
+       "string"
+      ]
+     },
+     "active": {
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "at": {
+      "format": "date-time",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "day": {
+      "format": "date",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "id": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "name": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "price": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "score": {
+      "type": [
+       "number",
+       "null"
+      ]
+     }
+    },
+    "type": "object"
+   },
+   "stream": "typed"
+  }
+ ]
+}

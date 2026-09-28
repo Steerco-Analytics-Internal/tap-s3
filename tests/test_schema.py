@@ -268,6 +268,8 @@ def convert(kind, value):
         ("string", decimal.Decimal("1.25"), "1.25"),
         ("object", {"a": datetime.date(2026, 9, 1)}, {"a": "2026-09-01"}),
         ("array", (1, b"\x00"), [1, "AA=="]),
+        ("array", '["a", 1]', ["a", 1]),
+        ("object", '{"a": 1}', {"a": 1}),
         ("integer", None, None),
     ],
 )
@@ -289,8 +291,9 @@ def test_conversion(kind, value, expected):
         ("date-time", "09/01/2026"),
         ("date-time", 5),
         ("date", 5),
-        ("object", "{}"),
-        ("array", "[]"),
+        ("object", "[]"),
+        ("object", "not json"),
+        ("array", "{}"),
     ],
 )
 def test_conversion_failures(kind, value):

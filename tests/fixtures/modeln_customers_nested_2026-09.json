@@ -1,0 +1,342 @@
+[
+ {
+  "id": "northwind-bio",
+  "name": "Northwind Biologics",
+  "domain": "northwind-bio.example",
+  "month": "2026-09",
+  "valueRealization": {
+   "grossSales": 52380.74,
+   "totalRequested": 9904.93,
+   "avoidedLeakage": 72.29,
+   "netSalesAllowed": 42548.1,
+   "adjustments": [
+    {
+     "name": "Chargebacks",
+     "moduleTag": "Provider Management",
+     "requested": 7043.84,
+     "invalid": 38.98,
+     "leakagePct": 0.55,
+     "allowed": 7004.86
+    },
+    {
+     "name": "Medicaid Rebates",
+     "moduleTag": "Medicaid",
+     "requested": 10012.08,
+     "invalid": 54.63,
+     "leakagePct": 0.55,
+     "allowed": 9957.45
+    },
+    {
+     "name": "Commercial Rebates",
+     "moduleTag": "Commercial Contracts",
+     "requested": 4062.63,
+     "invalid": 14.87,
+     "leakagePct": 0.37,
+     "allowed": 4047.76
+    },
+    {
+     "name": "340B Claims",
+     "moduleTag": "Validata",
+     "requested": 4946.48,
+     "invalid": 27.39,
+     "leakagePct": 0.55,
+     "allowed": 4919.09
+    }
+   ]
+  },
+  "licenseUtilization": {
+   "storage": {
+    "used": 8.3,
+    "threshold": 10,
+    "unit": "TB"
+   },
+   "transactions": {
+    "used": 3.5,
+    "threshold": 7.5,
+    "unit": "M"
+   },
+   "revenue_processed": {
+    "used": 57.5,
+    "threshold": 120,
+    "unit": "M"
+   },
+   "api_calls": {
+    "used": 12.6,
+    "threshold": 25,
+    "unit": "M"
+   }
+  }
+ },
+ {
+  "id": "contoso-pharma",
+  "name": "Contoso Pharma",
+  "domain": "contoso-pharma.example",
+  "month": "2026-09",
+  "valueRealization": {
+   "grossSales": 51666.8,
+   "totalRequested": 10255.67,
+   "avoidedLeakage": 55.35,
+   "netSalesAllowed": 41466.48,
+   "adjustments": [
+    {
+     "name": "Chargebacks",
+     "moduleTag": "Provider Management",
+     "requested": 5608.41,
+     "invalid": 19.5,
+     "leakagePct": 0.35,
+     "allowed": 5588.91
+    },
+    {
+     "name": "Medicaid Rebates",
+     "moduleTag": "Medicaid",
+     "requested": 7229.75,
+     "invalid": 42.02,
+     "leakagePct": 0.58,
+     "allowed": 7187.73
+    },
+    {
+     "name": "Commercial Rebates",
+     "moduleTag": "Commercial Contracts",
+     "requested": 8595.43,
+     "invalid": 34.91,
+     "leakagePct": 0.41,
+     "allowed": 8560.52
+    },
+    {
+     "name": "340B Claims",
+     "moduleTag": "Validata",
+     "requested": 7793.52,
+     "invalid": 36.67,
+     "leakagePct": 0.47,
+     "allowed": 7756.85
+    }
+   ]
+  },
+  "licenseUtilization": {
+   "storage": {
+    "used": 4.2,
+    "threshold": 10,
+    "unit": "TB"
+   },
+   "transactions": {
+    "used": 6.0,
+    "threshold": 7.5,
+    "unit": "M"
+   },
+   "revenue_processed": {
+    "used": 90.1,
+    "threshold": 120,
+    "unit": "M"
+   },
+   "api_calls": {
+    "used": 19.8,
+    "threshold": 25,
+    "unit": "M"
+   }
+  }
+ },
+ {
+  "id": "fabrikam-rx",
+  "name": "Fabrikam Rx",
+  "domain": "fabrikam-rx.example",
+  "month": "2026-09",
+  "valueRealization": {
+   "grossSales": 79893.66,
+   "totalRequested": 15118.91,
+   "avoidedLeakage": 43.94,
+   "netSalesAllowed": 64818.69,
+   "adjustments": [
+    {
+     "name": "Chargebacks",
+     "moduleTag": "Provider Management",
+     "requested": 1684.73,
+     "invalid": 3.82,
+     "leakagePct": 0.23,
+     "allowed": 1680.91
+    },
+    {
+     "name": "Medicaid Rebates",
+     "moduleTag": "Medicaid",
+     "requested": 3296.4,
+     "invalid": 8.73,
+     "leakagePct": 0.26,
+     "allowed": 3287.67
+    },
+    {
+     "name": "Commercial Rebates",
+     "moduleTag": "Commercial Contracts",
+     "requested": 4740.59,
+     "invalid": 10.48,
+     "leakagePct": 0.22,
+     "allowed": 4730.11
+    },
+    {
+     "name": "340B Claims",
+     "moduleTag": "Validata",
+     "requested": 1002.57,
+     "invalid": 2.61,
+     "leakagePct": 0.26,
+     "allowed": 999.96
+    }
+   ]
+  },
+  "licenseUtilization": {
+   "storage": {
+    "used": 4.5,
+    "threshold": 10,
+    "unit": "TB"
+   },
+   "transactions": {
+    "used": 4.2,
+    "threshold": 7.5,
+    "unit": "M"
+   },
+   "revenue_processed": {
+    "used": 49.4,
+    "threshold": 120,
+    "unit": "M"
+   },
+   "api_calls": {
+    "used": 19.8,
+    "threshold": 25,
+    "unit": "M"
+   }
+  }
+ },
+ {
+  "id": "tailspin-health",
+  "name": "Tailspin Health",
+  "domain": "tailspin-health.example",
+  "month": "2026-09",
+  "valueRealization": {
+   "grossSales": 70703.45,
+   "totalRequested": 11655.82,
+   "avoidedLeakage": 35.14,
+   "netSalesAllowed": 59082.77,
+   "adjustments": [
+    {
+     "name": "Chargebacks",
+     "moduleTag": "Provider Management",
+     "requested": 2351.26,
+     "invalid": 12.69,
+     "leakagePct": 0.54,
+     "allowed": 2338.57
+    },
+    {
+     "name": "Medicaid Rebates",
+     "moduleTag": "Medicaid",
+     "requested": 11924.13,
+     "invalid": 46.07,
+     "leakagePct": 0.39,
+     "allowed": 11878.06
+    },
+    {
+     "name": "Commercial Rebates",
+     "moduleTag": "Commercial Contracts",
+     "requested": 6322.18,
+     "invalid": 14.82,
+     "leakagePct": 0.23,
+     "allowed": 6307.36
+    },
+    {
+     "name": "340B Claims",
+     "moduleTag": "Validata",
+     "requested": 2124.06,
+     "invalid": 7.16,
+     "leakagePct": 0.34,
+     "allowed": 2116.9
+    }
+   ]
+  },
+  "licenseUtilization": {
+   "storage": {
+    "used": 5.2,
+    "threshold": 10,
+    "unit": "TB"
+   },
+   "transactions": {
+    "used": 5.8,
+    "threshold": 7.5,
+    "unit": "M"
+   },
+   "revenue_processed": {
+    "used": 56.7,
+    "threshold": 120,
+    "unit": "M"
+   },
+   "api_calls": {
+    "used": 10.3,
+    "threshold": 25,
+    "unit": "M"
+   }
+  }
+ },
+ {
+  "id": "litware-labs",
+  "name": "Litware Labs",
+  "domain": "litware-labs.example",
+  "month": "2026-09",
+  "valueRealization": {
+   "grossSales": 87549.28,
+   "totalRequested": 17757.25,
+   "avoidedLeakage": 28.8,
+   "netSalesAllowed": 69820.83,
+   "adjustments": [
+    {
+     "name": "Chargebacks",
+     "moduleTag": "Provider Management",
+     "requested": 6809.2,
+     "invalid": 40.27,
+     "leakagePct": 0.59,
+     "allowed": 6768.93
+    },
+    {
+     "name": "Medicaid Rebates",
+     "moduleTag": "Medicaid",
+     "requested": 10496.58,
+     "invalid": 50.22,
+     "leakagePct": 0.48,
+     "allowed": 10446.36
+    },
+    {
+     "name": "Commercial Rebates",
+     "moduleTag": "Commercial Contracts",
+     "requested": 3872.27,
+     "invalid": 13.42,
+     "leakagePct": 0.35,
+     "allowed": 3858.85
+    },
+    {
+     "name": "340B Claims",
+     "moduleTag": "Validata",
+     "requested": 2837.46,
+     "invalid": 14.44,
+     "leakagePct": 0.51,
+     "allowed": 2823.02
+    }
+   ]
+  },
+  "licenseUtilization": {
+   "storage": {
+    "used": 6.4,
+    "threshold": 10,
+    "unit": "TB"
+   },
+   "transactions": {
+    "used": 5.6,
+    "threshold": 7.5,
+    "unit": "M"
+   },
+   "revenue_processed": {
+    "used": 65.8,
+    "threshold": 120,
+    "unit": "M"
+   },
+   "api_calls": {
+    "used": 12.5,
+    "threshold": 25,
+    "unit": "M"
+   }
+  }
+ }
+]
