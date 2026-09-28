@@ -116,17 +116,25 @@ seek, so the tap decompresses it to a temporary file first.
 For each stream, the tap samples the 5 most recent objects and up to 1,000
 rows from each. The columns are the union across those objects.
 
-The tap infers types conservatively. A column is `integer`, `number`,
-`boolean` or `date-time` only when every non-empty sampled value parses as
-that type. Otherwise it is `string`.
+Every data column from a `.csv`, `.tsv` or `.txt` file is text, typed
+`["string", "null"]`, with no inference. An empty cell is null. Steerco's
+sync schema converts text to numbers, dates and booleans, so nothing is lost
+downstream. A value outside the sample, such as `N/A` in a column of
+numbers, can't break the sync.
 
-- Integers can't have leading zeros, so `02134` stays a string.
-- Booleans are `true` or `false` in any case. `yes` and `1` aren't booleans.
-- Dates and times must use ISO 8601, such as `2026-09-01` or
-  `2026-09-01T12:30:00Z`. `09/01/2026` stays a string.
-- A JSON string can only become `date-time`. The JSON string `"42"` stays a
-  string.
+JSON and JSONL columns keep their JSON types. The tap infers them
+conservatively: a column is `integer`, `number`, `boolean` or `date-time`
+only when every non-empty sampled value has that type. Otherwise it is
+`string`.
+
+- A JSON integer and a JSON number together make `number`.
+- A JSON string can only become `date-time`, and only in ISO 8601, such as
+  `2026-09-01` or `2026-09-01T12:30:00Z`. The JSON string `"42"` stays a
+  string, and so does `"09/01/2026"`.
 - Nested JSON values become `object` or `array`, with no fixed schema.
+- When files of different formats share a stream, a column with different
+  types across them becomes `string`. For example, a column that is text in a
+  CSV file and an integer in a JSONL file is `string`.
 - Parquet columns use the file's own types. A Parquet date becomes a string
   with format `date`.
 - Discovery skips an object it can't parse. It logs the object's key and the
@@ -204,11 +212,15 @@ The tap stops the sync on any object it can't parse. The error names the
 `s3://` address and the parse error, so the Hotglue job log shows the file.
 To leave a file out on purpose, use `exclude_pattern`.
 
-A value can also break its catalog type after sampling. For example, row 1,101
-of a file holds `N/A` in a column that the sample typed as `integer`. The
-tap stops the sync. The error names the object, the row, the column and the
-value. To sync the object, fix the file or change the column's type in the
-catalog.
+A JSON value can also break its catalog type after sampling. For example, row
+1,101 of a JSONL file holds `"N/A"` in a column that the sample typed as
+`integer`. The tap stops the sync. The error names the object, the row, the
+column and the value. To sync the object, fix the file or change the column's
+type in the catalog.
+
+A catalog saved before delimited columns became text can still type a CSV
+column as `integer`. The tap applies that type, and a value that doesn't fit
+fails the same way. To fix it, save the catalog again from a new discovery.
 
 ## Development
 
