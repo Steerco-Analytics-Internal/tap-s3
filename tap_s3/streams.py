@@ -228,8 +228,12 @@ class S3Stream(Stream):
 
     def __init__(self, tap: "TapS3", name: str, schema: dict) -> None:
         super().__init__(tap=tap, name=name, schema=schema)
+        limit = tap.record_limits.get(name)
+        if limit is not None:
+            self.ABORT_AT_RECORD_COUNT = limit
         self._reported_dropped = False
         self._reported_renamed = False
+        self._own_emitted = 0
         self.lineage: Lineage = ()
 
     @property
@@ -244,8 +248,28 @@ class S3Stream(Stream):
 
     @property
     def is_limited(self) -> bool:
-        """True when the SDK set a record limit, as in a sample or a dry run."""
+        """True when a record limit is set, as in a field-sample job or a dry run."""
         return self.ABORT_AT_RECORD_COUNT is not None
+
+    @property
+    def own_limit_reached(self) -> bool:
+        """True once this stream wrote as many of its own rows as its limit."""
+        limit = self.ABORT_AT_RECORD_COUNT
+        return limit is not None and self._own_emitted >= limit
+
+    def _check_max_record_limit(self, current_record_index: int) -> None:
+        """Leave the limit to get_records, so a limited sync ends cleanly.
+
+        The SDK raises an abort exception at the limit, and a sync outside a
+        dry run exits with an error. get_records stops at the limit instead.
+        """
+
+    def _group_done(self, children: Dict[Lineage, "S3ChildStream"]) -> bool:
+        """True when every selected stream in the group reached its limit."""
+        if not (self.selected or children):
+            return False
+        own_done = not self.selected or self.own_limit_reached
+        return own_done and all(child.limit_reached for child in children.values())
 
     def get_records(self, context: Optional[dict]) -> Iterable[Dict[str, Any]]:
         """Read each object once, and route its rows to every selected stream.
@@ -284,6 +308,7 @@ class S3Stream(Stream):
         }
         for child in children.values():
             child.begin()
+        self._own_emitted = 0
         objects = self._objects_to_read(listed)
         converter = RecordConverter(self.schema["properties"])
         since_checkpoint = 0
@@ -301,9 +326,7 @@ class S3Stream(Stream):
                 if not targets:
                     continue
                 yield from self._object_records(obj, converter, targets, children)
-                if children and not self.selected and all(
-                    child.limit_reached for child in children.values()
-                ):
+                if self._group_done(children):
                     # Every selected stream has its rows. Stop reading.
                     return
                 following = objects[index + 1] if index + 1 < len(objects) else None
@@ -406,14 +429,17 @@ class S3Stream(Stream):
                         first = next(found)
                         own, notes, pieces = first.row, first.split.notes, found
                     self._report_renamed(notes)
-                    if emit_own:
+                    if emit_own and not self.own_limit_reached:
                         yield self._own_record(
                             own, converter, uri, row_number, obj.key, last_modified
                         )
+                        self._own_emitted += 1
                     for piece in pieces:
                         child = children.get(piece.lineage)
                         if child is not None and child.name in targets:
                             child.emit(piece.row, uri, piece.split.notes)
+                    if self._group_done(children):
+                        return
 
     def _own_record(
         self,

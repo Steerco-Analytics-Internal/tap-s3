@@ -43,6 +43,9 @@ PARENT_STREAM_METADATA = "tap-s3.parent-stream"
 LIST_PATH_METADATA = "tap-s3.list-path"
 REQUIRED_SETTINGS = ("aws_access_key_id", "aws_secret_access_key", "bucket")
 DEFAULT_LOOKBACK_MINUTES = 60
+# Hotglue's field-sample job sends a record limit per stream in this setting.
+# Hotglue's own SDK reads it. The Meltano SDK doesn't, so the tap applies it.
+RECORD_LIMITS_SETTING = "_hg_max_records_limit"
 
 
 def utc_now() -> datetime.datetime:
@@ -160,6 +163,19 @@ class TapS3(Tap):
             ),
         ),
         th.Property(
+            RECORD_LIMITS_SETTING,
+            th.CustomType(
+                {
+                    "type": ["object", "null"],
+                    "additionalProperties": {"type": "integer", "minimum": 1},
+                }
+            ),
+            description=(
+                "Set by Hotglue, not by users. The most records to write for "
+                "each named stream, as in a field-sample job."
+            ),
+        ),
+        th.Property(
             "exclude_pattern",
             th.StringType,
             description=(
@@ -187,6 +203,28 @@ class TapS3(Tap):
             bucket=self.config["bucket"],
             region=self.config.get("region") or None,
         )
+
+    @cached_property
+    def record_limits(self) -> Dict[str, int]:
+        """The record limit for each stream named in RECORD_LIMITS_SETTING.
+
+        Discovery skips config validation, so the tap checks the value here.
+        A bad value is a config error, not a sync with no limit.
+        """
+        raw = self.config.get(RECORD_LIMITS_SETTING)
+        if raw is None:
+            return {}
+        if not isinstance(raw, dict):
+            raise ConfigValidationError(f"{RECORD_LIMITS_SETTING} must be an object.")
+        limits: Dict[str, int] = {}
+        for name, limit in raw.items():
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+                raise ConfigValidationError(
+                    f"{RECORD_LIMITS_SETTING} for stream '{name}' must be a "
+                    "whole number of at least 1."
+                )
+            limits[str(name)] = limit
+        return limits
 
     @cached_property
     def prefix(self) -> str:
@@ -261,6 +299,7 @@ class TapS3(Tap):
         # stream reads. Discovery skips config validation altogether.
         _ = self.incremental_mode
         _ = self.exclude_pattern
+        _ = self.record_limits
         if self.input_catalog:
             return self._streams_from_catalog()
         plan = self._plan(self.layout.streams)

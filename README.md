@@ -24,11 +24,17 @@ so the connection form stays the same.
 | `start_date` | No | The tap ignores objects last modified before this date and time. |
 | `lookback_minutes` | No | Defaults to 60. How far back each sync checks again for late objects. |
 | `exclude_pattern` | No | A regular expression. The tap ignores objects whose key matches it. |
+| `_hg_max_records_limit` | No | Set by Hotglue, not by users. The most records to write for each named stream. |
 
 `incremental_mode` accepts a boolean, a string, or the number 0 or 1, because
 Hotglue can send any of them. The strings `true`, `yes` and `1` mean true, and `false`, `no` and
 `0` mean false. Case and surrounding spaces don't matter. A missing value or
 an empty string means `true`. Any other value is a config error.
+
+`_hg_max_records_limit` maps stream names to whole numbers of at least 1, as
+in `{"customers": 10}`. Hotglue's field-sample job sends it. A stream it names
+stops at that many records, and a stream it leaves out has no limit. Any
+other value is a config error, so a bad value never turns into a full read.
 
 `exclude_pattern` is matched with a regex search against the key relative to
 `path_prefix`. Discovery and sync both apply it. Use it to leave out files
@@ -317,8 +323,11 @@ bucket again.
   null in every column that isn't a string.
 - The tap drops a column that isn't in the catalog schema. It logs one warning
   per stream.
-- The tap stops early when the SDK's record limit is reached. Hotglue
-  field-sample jobs rely on this.
+- The tap stops early when a stream reaches its record limit. The limit
+  comes from `_hg_max_records_limit` or from an SDK dry run. The sync then
+  ends without an error, and a stream with a limit writes no bookmark
+  changes. The tap stops reading objects once every selected stream in the
+  group has its rows.
 
 ### Incremental reads
 
