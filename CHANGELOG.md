@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.1.1
+
+### Fixed
+
+- The tap reads `_hg_max_records_limit`, the per-stream record limit that
+  Hotglue's field-sample job sends. Before, the tap ignored it, so a
+  field-sample job read every object in full.
+- A top-level stream that reaches its record limit ends the sync without an
+  error. Before, the SDK raised an abort exception at the limit.
+- A limited sync stops reading objects once every selected stream in the
+  group has its rows.
+- When every selected stream in a group has a record limit, a sync reads at
+  most 20 objects.
+
 ## 1.1.0
 
 ### Added
