@@ -11,6 +11,8 @@
   error. Before, the SDK raised an abort exception at the limit.
 - A limited sync stops reading objects once every selected stream in the
   group has its rows.
+- When every selected stream in a group has a record limit, a sync reads at
+  most 20 objects.
 
 ## 1.1.0
 

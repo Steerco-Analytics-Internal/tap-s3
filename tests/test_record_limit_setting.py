@@ -23,6 +23,20 @@ from tests.conftest import (
 from tap_s3.tap import RECORD_LIMITS_SETTING, TapS3
 
 
+def put_rows_at(bucket, key, count, modified):
+    rows = [json.dumps({"id": i, "items": [{"v": i}, {"v": i + 1000}]}) for i in range(count)]
+    bucket.put(key, "\n".join(rows) + "\n", modified)
+
+
+def select(catalog, names):
+    chosen = select_all(catalog)
+    for entry in chosen["streams"]:
+        for item in entry["metadata"]:
+            if item["breadcrumb"] == []:
+                item["metadata"]["selected"] = entry["stream"] in names
+    return chosen
+
+
 def put_rows(bucket, folder, count, with_items=False):
     rows = []
     for index in range(count):
@@ -135,3 +149,43 @@ def test_discovery_refuses_a_bad_setting(bucket, tmp_path, value):
     assert result.exit_code != 0
     assert isinstance(result.exception, ConfigValidationError)
     assert RECORD_LIMITS_SETTING in str(result.exception)
+
+
+def test_a_child_gets_its_rows_after_the_root_reaches_its_limit(bucket):
+    # Only every fifth row has an item, so the child needs more rows than
+    # the root's limit to fill its own.
+    rows = [
+        json.dumps({"id": i, "items": [{"v": i}] if i % 5 == 0 else []}) for i in range(100)
+    ]
+    bucket.put("o/a.jsonl", "\n".join(rows) + "\n", minutes(1))
+    messages = sync(select_all(discover()), **{RECORD_LIMITS_SETTING: {"o": 2, "o__items": 10}})
+    assert len(records(messages, "o")) == 2
+    assert len(records(messages, "o__items")) == 10
+
+
+def test_an_unlimited_child_reads_everything_and_moves_its_bookmark(bucket, tap_logs):
+    for index in range(3):
+        put_rows_at(bucket, f"o/{index}.jsonl", 20, minutes(index + 1))
+    catalog = select_all(discover())
+    messages = sync(catalog, **{RECORD_LIMITS_SETTING: {"o": 5}})
+    assert len(records(messages, "o")) == 5
+    assert len(records(messages, "o__items")) == 120
+    bookmarks = last_state(messages)["bookmarks"]
+    assert "replication_key_value" not in bookmarks.get("o", {})
+    assert bookmarks["o__items"]["replication_key_value"]
+    assert not any("stops after" in line for line in tap_logs)
+
+
+def test_a_limited_sync_reads_a_bounded_number_of_objects(bucket, tap_logs):
+    from tap_s3.streams import LIMITED_MAX_OBJECTS
+
+    total = LIMITED_MAX_OBJECTS + 10
+    for index in range(total):
+        items = [{"v": index}] if index == total - 1 else []
+        bucket.put(f"o/{index:03d}.jsonl", json.dumps({"id": index, "items": items}) + "\n", minutes(index + 1))
+    catalog = select(discover(), {"o__items"})
+    messages = sync(catalog, **{RECORD_LIMITS_SETTING: {"o__items": 10}})
+    assert records(messages, "o__items") == []
+    reads = [line for line in tap_logs if line.startswith("Reading ")]
+    assert len(reads) == LIMITED_MAX_OBJECTS
+    assert any("stops after" in line for line in tap_logs)

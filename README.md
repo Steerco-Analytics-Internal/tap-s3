@@ -327,7 +327,9 @@ bucket again.
   comes from `_hg_max_records_limit` or from an SDK dry run. The sync then
   ends without an error, and a stream with a limit writes no bookmark
   changes. The tap stops reading objects once every selected stream in the
-  group has its rows.
+  group has its rows. When every selected stream in a group has a limit, it
+  reads at most 20 objects, so a rarely filled child list can't make a
+  sample read the whole bucket.
 
 ### Incremental reads
 

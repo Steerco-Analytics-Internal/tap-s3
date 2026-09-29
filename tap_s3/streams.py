@@ -59,6 +59,10 @@ SAMPLE_ROWS = 1000
 
 WINDOW_STATE_KEY = "window"
 CHECKPOINT_OBJECTS = 100
+# A sync where every selected stream in a group has a record limit, as in a
+# field-sample job, reads at most this many objects. A child list that is
+# rarely filled can't then turn a sample into a read of the whole bucket.
+LIMITED_MAX_OBJECTS = 20
 CHECKPOINT_SECONDS = 30
 
 
@@ -314,8 +318,18 @@ class S3Stream(Stream):
         since_checkpoint = 0
         last_checkpoint = monotonic()
         streams = {stream.name: stream for stream in active}
+        all_limited = bool(active) and all(stream.is_limited for stream in active)
+        objects_read = 0
         try:
             for index, obj in enumerate(objects):
+                if all_limited and objects_read >= LIMITED_MAX_OBJECTS:
+                    self.logger.info(
+                        "Stream '%s' stops after %d objects, the most a limited "
+                        "sync reads.",
+                        self.name,
+                        LIMITED_MAX_OBJECTS,
+                    )
+                    return
                 targets = {
                     name
                     for name, stream_progress in progress.items()
@@ -326,6 +340,7 @@ class S3Stream(Stream):
                 if not targets:
                     continue
                 yield from self._object_records(obj, converter, targets, children)
+                objects_read += 1
                 if self._group_done(children):
                     # Every selected stream has its rows. Stop reading.
                     return
