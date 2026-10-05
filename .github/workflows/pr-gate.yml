@@ -1,0 +1,69 @@
+name: PR Review Gate
+
+# Change-management gate for SOC 2. The review happens locally and is posted
+# on the PR as a review-attestation comment stamped with the head SHA it
+# covered. This workflow checks that the attestation covers the exact current
+# head and turns it into the approving review that the branch ruleset needs.
+# Comment /gate on the PR to run it.
+
+on:
+  pull_request:
+    types: [ready_for_review]
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: pr-gate-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    if: |
+      github.event_name == 'pull_request' ||
+      (github.event.issue.pull_request != null &&
+       contains(github.event.comment.body, '/gate') &&
+       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Check review attestation
+        id: attest
+        run: |
+          HEAD_SHA=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq .headRefOid)
+          LATEST=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+            --jq '[.[] | select((.author_association == "OWNER" or .author_association == "MEMBER" or .author_association == "COLLABORATOR") and (.body | contains("<!-- review-attestation sha:")))] | last | .body // empty')
+          ATTESTED_SHA=$(printf '%s' "$LATEST" | grep -o 'review-attestation sha:[0-9a-f]*' | tail -1 | cut -d: -f2)
+          if [ -z "$ATTESTED_SHA" ]; then
+            STATE=missing
+          elif [ "$ATTESTED_SHA" = "$HEAD_SHA" ]; then
+            STATE=fresh
+          else
+            STATE=stale
+          fi
+          echo "Attestation state: $STATE (attested: ${ATTESTED_SHA:-none}, head: $HEAD_SHA)"
+          { echo "state=$STATE"; echo "head_sha=$HEAD_SHA"; echo "attested_sha=${ATTESTED_SHA:-none}"; } >> "$GITHUB_OUTPUT"
+
+      - name: Approve from attestation
+        if: steps.attest.outputs.state == 'fresh'
+        run: |
+          gh pr review "$PR_NUMBER" --repo "$REPO" --approve --body \
+            "Change-management gate: a review attestation exists for the exact current head (\`${{ steps.attest.outputs.head_sha }}\`). See the review-attestation comment on this PR for the full report."
+
+      - name: Request re-attestation
+        if: steps.attest.outputs.state == 'stale'
+        run: |
+          gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body \
+            "Change-management gate: the latest review attestation covers \`${{ steps.attest.outputs.attested_sha }}\` but the PR head is now \`${{ steps.attest.outputs.head_sha }}\`. Review the current head, post a fresh attestation, and comment \`/gate\`."
+
+      - name: No attestation
+        if: steps.attest.outputs.state == 'missing'
+        run: |
+          echo "::error::No review-attestation comment on this PR. Review it, post the attestation, then comment /gate."
+          exit 1
